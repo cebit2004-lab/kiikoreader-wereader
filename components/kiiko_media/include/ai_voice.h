@@ -36,7 +36,7 @@ typedef struct {
     ai_state_t state;
     char user[AI_USER_MAX];     // 最近一次识别出的你说的话 / your latest transcribed words
     char reply[AI_REPLY_MAX];   // AI 的回答（流式累积）/ the AI's reply, accumulated as it streams
-    char error[96];             // 最近的错误，空表示无 / last error, empty if none
+    char error[192];            // 最近的错误（含原因），空表示无 / last error with its cause, empty if none
     int mic_peak;               // 最近一段上传的峰值（放大后）/ recent upload peak (after gain)
     unsigned revision;          // 任何变化都递增 / bumps on any change
 } ai_status_t;
@@ -51,6 +51,13 @@ void ai_toggle(void);
 void ai_get_status(ai_status_t *out);
 /// 对话进行中（占用网络与音频）。/ A chat is running (holding the network and audio).
 bool ai_active(void);
+/// AI 说话时界面想刷屏就调用：返回 true 表示语音正处在停顿（或尚未起播），现在刷屏不会出破音，
+/// 播放会暂停等刷完；返回 false 表示已登记，等下一个停顿。刷完后（下一次 tick）调用 ai_redraw_done。
+/// Call while the AI speaks and the page wants to redraw: true means speech is at a pause (or not yet
+/// playing), so a refresh now cannot crackle and playback waits for it; false means the request is
+/// recorded for the next pause. Call ai_redraw_done once the refresh is complete (next tick).
+bool ai_redraw_slot(void);
+void ai_redraw_done(void);
 
 #ifdef __cplusplus
 }

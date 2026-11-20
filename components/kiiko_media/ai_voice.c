@@ -22,6 +22,7 @@
 #include "ai_voice.h"
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +36,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_websocket_client.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/queue.h"
@@ -66,7 +68,12 @@ static const char *TAG = "ai_voice";
 #define UPLOAD_GAIN 4              // BH1098G 麦克风偏小，放大后再上传 / the BH1098G mic is quiet; boost before upload
 #define IDLE_END_MS 20000          // 这么久没人说话就结束 / end after this long without speech
 #define PLAY_TAIL_MS 600           // 喇叭停下后麦克风再静音这么久 / keep the mic muted this long after the speaker stops
-#define SEND_TIMEOUT_MS 4000
+// 发送超时库会直接断开连接，WiFi 偶尔卡一下不能撞上这个时限（参考工程同为 8 秒）。
+// The client drops the connection on a send timeout, so a WiFi stall must not reach it (8 s as in the reference).
+#define SEND_TIMEOUT_MS 8000
+#define UP_FRAMES 32               // 上传缓冲 3.2 秒 / 3.2 s of upload backlog
+#define MAX_RETRIES 2              // 连接中断后自动重连次数 / automatic reconnects after a drop
+#define RETRY_DELAY_MS 1500
 #define CTL_STACK (8 * 1024)
 #define INSTRUCTIONS                                                                              \
     "你是墨水屏阅读器上的语音助手。用简短自然的中文口语回答，先说结论，一般不超过四句；"             \
@@ -91,11 +98,110 @@ static _Atomic bool s_session, s_streaming, s_responding;
 // Cancel request during connection: the control task may be blocked waiting for WiFi, so the queue alone is not enough.
 static volatile bool s_cancel;
 static _Atomic int64_t s_last_activity_us, s_last_play_us;
-static _Atomic int s_workers;       // 录音与播放任务数 / microphone + playback tasks alive
-static unsigned s_event_id;
-static uint32_t s_rs_phase;         // 24k→16k 重采样相位（Q16）/ resampler phase (Q16)
-static int16_t s_rs_prev;
+static _Atomic int s_workers;       // 录音、上传与播放任务数 / microphone, upload and playback tasks alive
+static _Atomic unsigned s_event_id;
+// 所有发送都持有这把锁；销毁连接前先拿到它，保证没有发送还在用旧连接。
+// Every send holds this lock; tearing the client down takes it first, so no send still uses the old client.
+static SemaphoreHandle_t s_send_mtx;
+// 录音任务只录音，上传任务只发送，中间是帧池：网络慢时不丢录音（参考工程同样分开）。
+// The mic task only records and the upload task only sends, joined by a frame pool, so a slow network
+// never drops recorded audio (split the same way in the reference).
+typedef struct {
+    int16_t pcm[MIC_SAMPLES];
+    int n;        // 0 = 只是提交标记 / 0 = commit marker only
+    bool commit;  // 发完后提交并请求回答 / commit and request a reply after sending
+} up_frame_t;
+static up_frame_t *s_frames;
+static QueueHandle_t s_up_free, s_up_ready;
+static int s_retries;
+static int64_t s_retry_at_us;       // 0 表示没有待重连 / 0 when no reconnect is pending
+static bool s_auth_failed;
+static char s_last_cause[160];      // 最近一次断线原因 / cause of the latest drop
+// 内存对账：会话开始前的内部 DMA 余量。/ Memory audit: internal DMA headroom before the session.
+static size_t s_mem_dma_before, s_mem_dma_largest_before;
+// 回复音频统计，用来确认 TLS 解密跟得上。/ Reply-audio stats, to confirm TLS decryption keeps up.
+static int64_t s_reply_first_us, s_reply_last_us;
+static size_t s_reply_samples;
+static unsigned s_underruns;
+#define PREBUFFER_MIN_MS 1000
+#define PREBUFFER_MAX_MS 3000
+static int s_prebuffer_ms = PREBUFFER_MIN_MS;  // 自适应起播缓冲 / adaptive start-of-playback buffer
+// 刷屏握手：墨水屏刷新会让播放任务 0.1–0.3 秒拿不到 CPU，I2S 放空。在语音停顿处放行刷屏并暂停送数，
+// 放空就只是把停顿拉长一点，听不出来。
+// Redraw handshake: an e-paper refresh starves the playback task for 0.1–0.3 s and I2S runs dry. Granting
+// the refresh at a pause in speech, with feeding paused, only lengthens that pause, which is inaudible.
+#define QUIET_RMS 300              // 片段结尾低于此电平算停顿 / a chunk tail below this level counts as a pause
+#define QUIET_TAIL 320             // 看结尾 20 ms / check the last 20 ms
+#define REDRAW_HOLD_MAX_MS 800     // 界面没反应时最多等这么久 / longest wait if the page does not respond
+static _Atomic bool s_ui_wants, s_ui_granted, s_ui_busy;
+static unsigned s_ui_pauses, s_ui_pause_ms;
+// 24k→16k 重采样：带低通的多相 FIR（2/3 倍）。线性插值不滤高频，8–12 kHz 折回可听频段，齿音发破。
+// 24k→16k resampling: a low-passed polyphase FIR (ratio 2/3). Linear interpolation does not filter, so
+// 8–12 kHz folds back into the audible band and sibilants crackle.
+#define RS_TAPS 48                   // 每相抽头 / taps per phase
+#define RS_CUTOFF_HZ 7000
+static int16_t s_rs_coef[2][RS_TAPS];  // Q15；相 0 落在样点上，相 1 在两点正中 / phase 0 on a sample, phase 1 halfway
+static int16_t *s_rs_in;             // RS_TAPS 个历史样点 + 本块 / RS_TAPS history samples + this chunk
+static int s_rs_pos;                 // 下一个输出在 s_rs_in 中的位置（半个输入样点为单位）/ next output position, in half input samples
 static int16_t *s_rs_out;
+static _Atomic bool s_ws_connected;  // 握手已完成 / handshake completed
+static wifi_ps_type_t s_prev_ps;
+static bool s_ps_saved;
+
+// ---------------------------------------------------------------- session log
+// 每次会话的关键事件同时打到串口并记在 PSRAM，会话结束时由控制任务追加到 /sdcard/ai_debug/ai.log，
+// 不接电脑也能事后查（U 盘模式取出）。
+// Each session's key events go to the serial log and a PSRAM buffer; the control task appends them to
+// /sdcard/ai_debug/ai.log when the session ends, so they can be checked later without a computer
+// (read in USB drive mode).
+
+#define LOG_CAP (16 * 1024)
+#define LOG_FILE "/sdcard/ai_debug/ai.log"
+#define LOG_FILE_MAX (256 * 1024)
+static char *s_log;
+static size_t s_log_len;
+static portMUX_TYPE s_log_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void ai_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void ai_log(const char *fmt, ...) {
+    char line[320];
+    int n = snprintf(line, sizeof(line), "[%7lld] ", (long long)(esp_timer_get_time() / 1000));
+    va_list args;
+    va_start(args, fmt);
+    n += vsnprintf(line + n, sizeof(line) - (size_t)n, fmt, args);
+    va_end(args);
+    if (n > (int)sizeof(line) - 2) n = (int)sizeof(line) - 2;
+    ESP_LOGI(TAG, "%s", line);
+    line[n++] = '\n';
+    if (!s_log) return;
+    taskENTER_CRITICAL(&s_log_mux);
+    if (s_log_len + (size_t)n <= LOG_CAP) {
+        memcpy(s_log + s_log_len, line, (size_t)n);
+        s_log_len += (size_t)n;
+    }
+    taskEXIT_CRITICAL(&s_log_mux);
+}
+
+// 只在控制任务（内部 RAM 栈）里调用。/ Call only from the control task (internal-RAM stack).
+static void log_flush(void) {
+    if (!s_log || !s_log_len) return;
+    mkdir("/sdcard/ai_debug", 0777);
+    struct stat st;
+    const bool rotate = stat(LOG_FILE, &st) == 0 && st.st_size > LOG_FILE_MAX;
+    FILE *f = fopen(LOG_FILE, rotate ? "w" : "a");
+    taskENTER_CRITICAL(&s_log_mux);
+    const size_t len = s_log_len;
+    taskEXIT_CRITICAL(&s_log_mux);
+    if (f) {
+        fwrite(s_log, 1, len, f);
+        fclose(f);
+    }
+    // 写文件期间新追加的行留给下次。/ Lines appended while writing stay for the next flush.
+    taskENTER_CRITICAL(&s_log_mux);
+    memmove(s_log, s_log + len, s_log_len - len);
+    s_log_len -= len;
+    taskEXIT_CRITICAL(&s_log_mux);
+}
 
 // ---------------------------------------------------------------- status
 
@@ -117,14 +223,20 @@ static void post(cmd_t cmd) { if (s_cmds) xQueueSend(s_cmds, &cmd, 0); }
 // ---------------------------------------------------------------- sending
 
 static void send_text(char *text, size_t len) {
-    if (s_ws && esp_websocket_client_is_connected(s_ws) &&
-        esp_websocket_client_send_text(s_ws, text, (int)len, pdMS_TO_TICKS(SEND_TIMEOUT_MS)) < 0)
-        ESP_LOGW(TAG, "send failed");
+    xSemaphoreTake(s_send_mtx, portMAX_DELAY);
+    if (s_ws && esp_websocket_client_is_connected(s_ws)) {
+        const int64_t t0 = esp_timer_get_time();
+        const int sent = esp_websocket_client_send_text(s_ws, text, (int)len, pdMS_TO_TICKS(SEND_TIMEOUT_MS));
+        const int ms = (int)((esp_timer_get_time() - t0) / 1000);
+        if (sent < 0) ai_log("send failed: %u bytes after %d ms", (unsigned)len, ms);
+        else if (ms > 1000) ai_log("slow send: %u bytes took %d ms", (unsigned)len, ms);
+    }
+    xSemaphoreGive(s_send_mtx);
 }
 
 static void send_json(cJSON *root) {
     char id[16];
-    snprintf(id, sizeof(id), "c%u", ++s_event_id);
+    snprintf(id, sizeof(id), "c%u", atomic_fetch_add(&s_event_id, 1) + 1);
     cJSON_AddStringToObject(root, "event_id", id);
     char *text = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -171,20 +283,49 @@ static void clear_playback(void) {
     for (int i = 0; i < 20 && xStreamBufferReset(s_play) != pdPASS; ++i) vTaskDelay(pdMS_TO_TICKS(10));
 }
 
-// 24 kHz → 16 kHz 线性插值，s_rs_prev 跨块衔接。/ Linear 24 kHz → 16 kHz, s_rs_prev bridging chunks.
+static void resampler_init(void) {
+    const float fc = (float)RS_CUTOFF_HZ / REPLY_RATE;  // 相对输入采样率 / relative to the input rate
+    const float half = RS_TAPS / 2;
+    for (int phase = 0; phase < 2; ++phase) {
+        float h[RS_TAPS], sum = 0;
+        for (int j = 0; j < RS_TAPS; ++j) {
+            const float d = (float)(j - (RS_TAPS / 2 - 1)) - 0.5f * (float)phase;  // 到输出点的距离 / distance to the output point
+            const float x = 2.0f * fc * d;
+            const float sinc = fabsf(x) < 1e-6f ? 1.0f : sinf((float)M_PI * x) / ((float)M_PI * x);
+            const float w = fabsf(d) >= half ? 0.0f
+                            : 0.42f + 0.5f * cosf((float)M_PI * d / half) + 0.08f * cosf(2.0f * (float)M_PI * d / half);
+            h[j] = sinc * w;
+            sum += h[j];
+        }
+        for (int j = 0; j < RS_TAPS; ++j) s_rs_coef[phase][j] = (int16_t)lrintf(h[j] / sum * 32767.0f);
+    }
+}
+
+static void resampler_reset(void) {
+    if (s_rs_in) memset(s_rs_in, 0, RS_TAPS * sizeof(int16_t));
+    s_rs_pos = RS_TAPS;  // 第一个输出以第 RS_TAPS/2 个历史样点为中心 / the first output centres on history sample RS_TAPS/2
+}
+
+// 每 3 个输入出 2 个输出；末尾 RS_TAPS 个样点留作下一块的历史。
+// Two outputs per three inputs; the last RS_TAPS samples stay as history for the next chunk.
 static int resample_reply(const int16_t *in, int n, int16_t *out, int cap) {
-    const uint32_t step = (uint32_t)(((uint64_t)REPLY_RATE << 16) / AUDIO_RATE);
+    if (!s_rs_in || n <= 0) return 0;
+    memcpy(s_rs_in + RS_TAPS, in, (size_t)n * sizeof(int16_t));
+    const int total = RS_TAPS + n;
     int produced = 0;
     while (produced < cap) {
-        const uint32_t idx = s_rs_phase >> 16;
-        if ((int)idx >= n) break;
-        const int32_t a = idx == 0 ? s_rs_prev : in[idx - 1];
-        const int32_t b = in[idx];
-        out[produced++] = (int16_t)(a + (((b - a) * (int32_t)(s_rs_phase & 0xffff)) >> 16));
-        s_rs_phase += step;
+        const int first = (s_rs_pos >> 1) - (RS_TAPS / 2 - 1);
+        if (first + RS_TAPS > total) break;
+        const int16_t *x = s_rs_in + first;
+        const int16_t *h = s_rs_coef[s_rs_pos & 1];
+        int64_t acc = 0;
+        for (int j = 0; j < RS_TAPS; ++j) acc += (int32_t)x[j] * h[j];
+        const int32_t v = (int32_t)((acc + (1 << 14)) >> 15);
+        out[produced++] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+        s_rs_pos += 3;
     }
-    s_rs_phase -= (uint32_t)n << 16;
-    s_rs_prev = in[n - 1];
+    memmove(s_rs_in, s_rs_in + n, RS_TAPS * sizeof(int16_t));
+    s_rs_pos -= 2 * n;
     return produced;
 }
 
@@ -201,8 +342,17 @@ static void play_audio_event(char *text) {
     const int n = (int)(pcm_len / 2);
     if (n <= 0) return;
     const int m = resample_reply((const int16_t *)text, n, s_rs_out, RX_CAP / 2);
-    xStreamBufferSend(s_play, s_rs_out, (size_t)m * sizeof(int16_t), pdMS_TO_TICKS(100));
-    if (s_st.state != AI_SPEAKING) set_state(AI_SPEAKING);
+    const int64_t now = esp_timer_get_time();
+    if (!s_reply_first_us) s_reply_first_us = now;
+    s_reply_last_us = now;
+    s_reply_samples += (size_t)m;
+    const size_t queued = xStreamBufferSend(s_play, s_rs_out, (size_t)m * sizeof(int16_t), pdMS_TO_TICKS(100));
+    if (queued < (size_t)m * sizeof(int16_t)) ai_log("playback buffer full: dropped %u bytes", (unsigned)((size_t)m * 2 - queued));
+    if (s_st.state != AI_SPEAKING) {
+        ai_log("reply audio started (%d samples, volume %d, i2s %d Hz measured %d)", m, metalio_audio_volume(),
+               metalio_audio_sample_rate(), metalio_audio_actual_rate());
+        set_state(AI_SPEAKING);
+    }
 }
 
 static void handle_event(const char *text) {
@@ -210,12 +360,17 @@ static void handle_event(const char *text) {
     const char *type = root ? cJSON_GetStringValue(cJSON_GetObjectItem(root, "type")) : NULL;
     if (!type) { cJSON_Delete(root); return; }
     if (!strcmp(type, "session.created")) {
+        ai_log("session.created");
         post(CMD_CONFIGURE);
     } else if (!strcmp(type, "session.updated")) {
         atomic_store(&s_streaming, true);
         touch();
-        set_state(AI_LISTENING);
-        ESP_LOGI(TAG, "ready");
+        s_retries = 0;
+        lock();
+        s_st.state = AI_LISTENING;
+        s_st.error[0] = 0;  // 重连成功，清掉“正在重连”/ reconnected: clear the reconnect notice
+        unlock();
+        ai_log("session.updated: ready");
     } else if (!strcmp(type, "input_audio_buffer.speech_started")) {
         touch();
         set_state(AI_HEARING);
@@ -225,7 +380,7 @@ static void handle_event(const char *text) {
     } else if (!strcmp(type, "conversation.item.input_audio_transcription.completed")) {
         const char *said = cJSON_GetStringValue(cJSON_GetObjectItem(root, "transcript"));
         if (said) {
-            ESP_LOGI(TAG, "USER: %s", said);
+            ai_log("USER: %.200s", said);
             lock();
             snprintf(s_st.user, sizeof(s_st.user), "%s", said);
             unlock();
@@ -233,8 +388,10 @@ static void handle_event(const char *text) {
     } else if (!strcmp(type, "response.created")) {
         touch();
         atomic_store(&s_responding, true);
-        s_rs_phase = 0;
-        s_rs_prev = 0;
+        resampler_reset();
+        atomic_store(&s_ui_wants, false);  // 上一段遗留的刷屏请求作废 / drop a redraw request left from the last reply
+        s_reply_first_us = s_reply_last_us = 0;
+        s_reply_samples = 0;
         lock();
         s_st.reply[0] = 0;
         if (s_st.state != AI_SPEAKING) s_st.state = AI_THINKING;
@@ -250,19 +407,26 @@ static void handle_event(const char *text) {
         }
     } else if (!strcmp(type, "response.audio_transcript.done")) {
         const char *reply = cJSON_GetStringValue(cJSON_GetObjectItem(root, "transcript"));
-        ESP_LOGI(TAG, "AI: %s", reply ? reply : "");
+        ai_log("AI: %.200s", reply ? reply : "");
     } else if (!strcmp(type, "response.done")) {
         touch();
         atomic_store(&s_responding, false);
         // 没有语音的回答（没听清等）：回到等待说话，否则麦克风一直不听。
         // A reply without audio (e.g. not understood): back to listening, or the mic would stay deaf.
         if (s_st.state == AI_THINKING || s_st.state == AI_HEARING) set_state(AI_LISTENING);
-        ESP_LOGI(TAG, "response done; internal=%u dma=%u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+        // 收到的语音时长 ÷ 接收用时：大于 1 说明网络与 TLS 解密都跟得上播放。
+        // Audio received ÷ time taken to receive it: above 1 means network and TLS decryption outpace playback.
+        const int audio_ms = (int)(s_reply_samples * 1000 / AUDIO_RATE);
+        const int recv_ms = s_reply_first_us ? (int)((s_reply_last_us - s_reply_first_us) / 1000) : 0;
+        ai_log("response.done: reply audio %d ms received in %d ms (%.1fx realtime); internal=%u dma=%u", audio_ms,
+               recv_ms, recv_ms > 0 ? (double)audio_ms / recv_ms : 0.0,
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
     } else if (!strcmp(type, "error")) {
         const cJSON *err = cJSON_GetObjectItem(root, "error");
         const char *msg = cJSON_GetStringValue(cJSON_GetObjectItem(err, "message"));
-        ESP_LOGE(TAG, "server error: %s", msg ? msg : "");
+        const char *code = cJSON_GetStringValue(cJSON_GetObjectItem(err, "code"));
+        ai_log("server error: code=%s msg=%.200s", code ? code : "", msg ? msg : "");
         atomic_store(&s_responding, false);
         set_error(msg ? msg : "服务返回错误");
         if (s_st.state == AI_THINKING || s_st.state == AI_HEARING) set_state(AI_LISTENING);
@@ -276,7 +440,19 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     esp_websocket_event_data_t *ev = data;
     if (!s_ws || !s_rx) return;
     switch (id) {
+    case WEBSOCKET_EVENT_CONNECTED:
+        atomic_store(&s_ws_connected, true);
+        ai_log("ws connected; internal=%u dma=%u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+        break;
     case WEBSOCKET_EVENT_DATA:
+        if (ev->op_code == 8) {  // 服务端关闭帧：2 字节关闭码 + 原因 / server close frame: 2-byte code + reason
+            const int code = ev->data_len >= 2 ? ((uint8_t)ev->data_ptr[0] << 8 | (uint8_t)ev->data_ptr[1]) : 0;
+            ai_log("server closed: code=%d reason=%.*s", code, ev->data_len > 2 ? ev->data_len - 2 : 0,
+                   ev->data_len > 2 ? ev->data_ptr + 2 : "");
+            snprintf(s_last_cause, sizeof(s_last_cause), "AI 服务关闭了连接（%d）", code);
+            break;
+        }
         if (ev->op_code != 1 && ev->op_code != 0) break;
         if (ev->payload_offset == 0) s_rx_overflow = false;
         if (ev->payload_offset + ev->data_len < RX_CAP) memcpy(s_rx + ev->payload_offset, ev->data_ptr, ev->data_len);
@@ -295,14 +471,38 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
         }
         break;
     case WEBSOCKET_EVENT_ERROR: {
-        const int http = ev->error_handle.esp_ws_handshake_status_code;
-        ESP_LOGE(TAG, "ws error type=%d http=%d", ev->error_handle.error_type, http);
-        set_error(http == 401 || http == 403 ? "API Key 无效" : "连接 AI 服务失败");
+        const esp_websocket_error_codes_t *e = &ev->error_handle;
+        const int http = e->esp_ws_handshake_status_code;
+        const bool connected = atomic_load(&s_ws_connected);
+        ai_log("ws error (%s) type=%d http=%d tls=%s/-0x%x sock_errno=%d: %.*s",
+               connected ? "after connect" : "connecting", (int)e->error_type, http,
+               esp_err_to_name(e->esp_tls_last_esp_err), (unsigned)-e->esp_tls_stack_err, e->esp_transport_sock_errno,
+               ev->data_len > 0 ? ev->data_len : 0, ev->data_len > 0 && ev->data_ptr ? ev->data_ptr : "");
+        // 能区分原因的简短说明；重连都失败时显示在屏幕上。/ A short reason that tells causes apart; shown if reconnecting fails.
+        const char *detail = ev->data_len > 0 && ev->data_ptr ? ev->data_ptr : "";
+        const char *phase = strstr(detail, "write") ? "发送失败" : strstr(detail, "PONG") ? "心跳超时"
+                            : strstr(detail, "read") ? "接收失败" : "网络错误";
+        char *msg = s_last_cause;
+        const size_t cap = sizeof(s_last_cause);
+        if (http == 401 || http == 403) {
+            s_auth_failed = true;  // 重连也没用 / reconnecting cannot fix this
+            snprintf(msg, cap, "API Key 无效（HTTP %d）", http);
+        } else if (http >= 400) {
+            s_auth_failed = true;
+            snprintf(msg, cap, "AI 服务拒绝连接（HTTP %d），检查模型名", http);
+        } else if (connected) {
+            snprintf(msg, cap, "与 AI 服务的连接中断（%s，errno %d）", phase, e->esp_transport_sock_errno);
+        } else if (e->esp_tls_last_esp_err) {
+            snprintf(msg, cap, "连接 AI 服务失败（%s）", esp_err_to_name(e->esp_tls_last_esp_err));
+        } else {
+            snprintf(msg, cap, "连接 AI 服务失败（errno %d）", e->esp_transport_sock_errno);
+        }
         post(CMD_WS_END);
         break;
     }
     case WEBSOCKET_EVENT_DISCONNECTED:
     case WEBSOCKET_EVENT_CLOSED:
+        ai_log("ws %s", id == WEBSOCKET_EVENT_CLOSED ? "closed" : "disconnected");
         post(CMD_WS_END);
         break;
     default:
@@ -322,8 +522,11 @@ static bool playing_recently(void) {
 #define END_FRAMES 8
 #define MAX_SPEECH_FRAMES 150
 
-// TEMP 调试：把前几段上传的语音（放大后）存成 WAV，查音质。/ TEMP debug: save the first few uploaded utterances (boosted) as WAV to check quality.
-#define DEBUG_WAV_MAX 5
+// 调试：把前几段上传的语音（放大后）存成 WAV 查音质。默认关闭：SD 写入同样要借内部 DMA，而对话中
+// 内部 DMA 最紧张。查音质时临时改成 5。
+// Debug: save the first few uploaded utterances (boosted) as WAV to check quality. Off by default: SD
+// writes also borrow internal DMA, which is scarcest during a chat. Set to 5 temporarily when needed.
+#define DEBUG_WAV_MAX 0
 #define DEBUG_WAV_SAMPLES (MAX_SPEECH_FRAMES * MIC_SAMPLES + PREROLL_FRAMES * MIC_SAMPLES)
 static int16_t *s_dbg;
 static size_t s_dbg_len;
@@ -356,18 +559,58 @@ static void dbg_flush(void) {
     s_dbg_len = 0;
 }
 
-// 上传一段（放大后）音频。/ Upload one chunk of audio, boosted.
-static void send_audio(char *msg, size_t b64_cap, int16_t *pcm, int n) {
-    for (int i = 0; i < n; ++i) {
-        int v = pcm[i] * UPLOAD_GAIN;
-        pcm[i] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+// 把一段（放大后）音频交给上传任务；commit 为真时发完再提交并请求回答。缓冲满时丢弃并计数。
+// Hand one chunk of audio (boosted) to the upload task; with commit, it commits and requests a reply
+// after sending. Dropped and counted when the backlog is full.
+static unsigned s_up_dropped;
+static void queue_audio(const int16_t *pcm, int n, bool commit) {
+    up_frame_t *f = NULL;
+    // 提交标记必须送到，多等一会儿；音频帧不等，免得耽误录音。
+    // A commit marker must get through, so wait a little; audio frames never wait, so recording never stalls.
+    if (xQueueReceive(s_up_free, &f, commit ? pdMS_TO_TICKS(500) : 0) != pdTRUE) {
+        if (++s_up_dropped == 1 || s_up_dropped % 10 == 0) ai_log("upload backlog full: dropped %u frames", s_up_dropped);
+        return;
     }
-    dbg_add(pcm, n);
-    const int head = snprintf(msg, 96, "{\"event_id\":\"a%u\",\"type\":\"input_audio_buffer.append\",\"audio\":\"", ++s_event_id);
-    size_t b64_len = 0;
-    mbedtls_base64_encode((unsigned char *)msg + head, b64_cap, &b64_len, (const unsigned char *)pcm, (size_t)n * 2);
-    memcpy(msg + head + b64_len, "\"}", 3);
-    send_text(msg, (size_t)head + b64_len + 2);
+    for (int i = 0; i < n; ++i) {
+        const int v = pcm[i] * UPLOAD_GAIN;
+        f->pcm[i] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+    }
+    if (n > 0) dbg_add(f->pcm, n);
+    f->n = n;
+    f->commit = commit;
+    xQueueSend(s_up_ready, &f, 0);  // 帧池总数等于队列容量，不会满 / the pool size equals the queue depth, so never full
+}
+
+// 上传任务：只负责发送。网络慢时阻塞的是它，录音照常进行。
+// Upload task: sending only. A slow network blocks this task while recording carries on.
+static void upload_task(void *arg) {
+    (void)arg;
+    const size_t b64_cap = (MIC_SAMPLES * 2 / 3 + 2) * 4 + 1;
+    char *msg = heap_caps_malloc(b64_cap + 128, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    while (atomic_load(&s_session)) {
+        up_frame_t *f;
+        if (xQueueReceive(s_up_ready, &f, pdMS_TO_TICKS(100)) != pdTRUE) continue;
+        // 重连期间积压的音频属于断掉的会话，直接丢弃。/ Audio queued across a reconnect belongs to the lost session; drop it.
+        if (msg && atomic_load(&s_streaming)) {
+            if (f->n > 0) {
+                const int head = snprintf(msg, 96, "{\"event_id\":\"a%u\",\"type\":\"input_audio_buffer.append\",\"audio\":\"",
+                                          atomic_fetch_add(&s_event_id, 1) + 1);
+                size_t b64_len = 0;
+                mbedtls_base64_encode((unsigned char *)msg + head, b64_cap, &b64_len, (const unsigned char *)f->pcm,
+                                      (size_t)f->n * 2);
+                memcpy(msg + head + b64_len, "\"}", 3);
+                send_text(msg, (size_t)head + b64_len + 2);
+            }
+            if (f->commit) {
+                send_type("input_audio_buffer.commit");
+                send_type("response.create");
+            }
+        }
+        xQueueSend(s_up_free, &f, 0);
+    }
+    heap_caps_free(msg);
+    atomic_fetch_sub(&s_workers, 1);
+    vTaskDeleteWithCaps(NULL);
 }
 
 static int frame_rms(const int16_t *pcm, int n) {
@@ -377,27 +620,25 @@ static int frame_rms(const int16_t *pcm, int n) {
 }
 
 /*
- * 本地判断说话，只上传说话的片段：一直上传 16 kHz 音频每秒约 43 KB（base64 后），这块板子的上行撑不住，
- * 实测几秒就发送超时断线。音量明显高于底噪即开始（带 0.3 秒预录），安静 0.8 秒即提交并请求回答，
- * 单句最长 15 秒。AI 说话时不判断、不上传（没有回声消除）。
- * Detect speech locally and upload only speech: streaming 16 kHz audio continuously is ~43 KB/s after
- * base64, more than this board's uplink sustains (measured: send timeout and disconnect within
- * seconds). Speech starts when the level clearly exceeds the noise floor (with 0.3 s of pre-roll);
- * 0.8 s of quiet commits it and requests a reply; one utterance is capped at 15 s. Nothing is judged
- * or uploaded while the AI speaks (no echo cancellation).
+ * 本地判断说话，只上传说话的片段（约 43 KB/s，base64 后）。音量明显高于底噪即开始（带 0.3 秒预录），
+ * 安静 0.8 秒即提交并请求回答，单句最长 15 秒。AI 说话时不判断、不上传（没有回声消除）。
+ * 注：早先“上行撑不住持续上传”的结论是在 WiFi 省电开着、硬件 AES 缺内存时测的，尚未重新验证。
+ * Detect speech locally and upload only speech (~43 KB/s after base64). Speech starts when the level
+ * clearly exceeds the noise floor (with 0.3 s of pre-roll); 0.8 s of quiet commits it and requests a
+ * reply; one utterance is capped at 15 s. Nothing is judged or uploaded while the AI speaks (no echo
+ * cancellation). Note: the earlier finding that the uplink cannot sustain continuous upload was
+ * measured with WiFi power saving on and hardware AES short of memory; it has not been re-checked.
  */
 
 static void mic_task(void *arg) {
     (void)arg;
     const uint32_t caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    const size_t b64_cap = (MIC_SAMPLES * 2 / 3 + 2) * 4 + 1;
     int16_t *pcm = heap_caps_malloc(MIC_SAMPLES * sizeof(int16_t), caps);
     int16_t *preroll = heap_caps_malloc(PREROLL_FRAMES * MIC_SAMPLES * sizeof(int16_t), caps);
-    char *msg = heap_caps_malloc(b64_cap + 128, caps);
-    if (!s_dbg) s_dbg = heap_caps_malloc(DEBUG_WAV_SAMPLES * sizeof(int16_t), caps);
+    if (DEBUG_WAV_MAX && !s_dbg) s_dbg = heap_caps_malloc(DEBUG_WAV_SAMPLES * sizeof(int16_t), caps);
     int noise = 0, loud = 0, quiet = 0, frames = 0, pre_count = 0, pre_head = 0, level_max = 0, chunks = 0;
     bool speaking = false;
-    while (pcm && preroll && msg && atomic_load(&s_session)) {
+    while (pcm && preroll && atomic_load(&s_session)) {
         const int n = metalio_audio_read(pcm, MIC_SAMPLES, pdMS_TO_TICKS(200));
         if (n != MIC_SAMPLES || !atomic_load(&s_streaming)) continue;
         if (s_st.state == AI_SPEAKING || s_st.state == AI_THINKING || playing_recently()) {
@@ -410,7 +651,7 @@ static void mic_task(void *arg) {
             lock();
             s_st.mic_peak = level_max;
             unlock();
-            ESP_LOGI(TAG, "mic level max=%d noise=%d", level_max, noise);
+            if (chunks % 50 == 0) ai_log("mic level max=%d noise=%d", level_max, noise);  // 每 5 秒记一次 / every 5 s
             level_max = 0;
         }
         if (!noise) noise = rms;
@@ -430,48 +671,117 @@ static void mic_task(void *arg) {
             frames = 0;
             touch();
             set_state(AI_HEARING);
-            ESP_LOGI(TAG, "speech start rms=%d noise=%d", rms, noise);
+            ai_log("speech start rms=%d noise=%d", rms, noise);
             // 先送预录（含刚才判定为说话的几帧）。/ Send the pre-roll first, including the frames that triggered.
             for (int i = 0; i < pre_count; ++i) {
                 const int idx = (pre_head + PREROLL_FRAMES - pre_count + i) % PREROLL_FRAMES;
-                send_audio(msg, b64_cap, preroll + idx * MIC_SAMPLES, MIC_SAMPLES);
+                queue_audio(preroll + idx * MIC_SAMPLES, MIC_SAMPLES, false);
             }
             pre_count = 0;
             continue;
         }
-        send_audio(msg, b64_cap, pcm, n);
         ++frames;
         quiet = rms < end_th ? quiet + 1 : 0;
-        if (quiet >= END_FRAMES || frames >= MAX_SPEECH_FRAMES) {
+        const bool end = quiet >= END_FRAMES || frames >= MAX_SPEECH_FRAMES;
+        queue_audio(pcm, n, end);
+        if (end) {
             speaking = false;
             loud = 0;
-            ESP_LOGI(TAG, "speech end after %d frames", frames);
-            dbg_flush();
-            send_type("input_audio_buffer.commit");
-            send_type("response.create");
+            ai_log("speech end after %d frames (upload backlog %u)", frames, (unsigned)uxQueueMessagesWaiting(s_up_ready));
             touch();
             set_state(AI_THINKING);
+            dbg_flush();
         }
     }
     heap_caps_free(pcm);
     heap_caps_free(preroll);
-    heap_caps_free(msg);
     atomic_fetch_sub(&s_workers, 1);
     vTaskDeleteWithCaps(NULL);
+}
+
+static bool tail_quiet(const int16_t *pcm, size_t n) {
+    const size_t k = n < QUIET_TAIL ? n : QUIET_TAIL;
+    return frame_rms(pcm + (n - k), (int)k) < QUIET_RMS;
+}
+
+// 有刷屏请求就放行，并等它刷完（最多 REDRAW_HOLD_MAX_MS）。只在不出声的时刻调用。
+// Grant a pending redraw and wait for it to finish (at most REDRAW_HOLD_MAX_MS). Call only while silent.
+static void grant_redraw_if_wanted(void) {
+    if (!atomic_exchange(&s_ui_wants, false)) return;
+    const int64_t t0 = esp_timer_get_time();
+    atomic_store(&s_ui_busy, true);
+    atomic_store(&s_ui_granted, true);
+    while (atomic_load(&s_ui_busy) && atomic_load(&s_session) &&
+           esp_timer_get_time() - t0 < (int64_t)REDRAW_HOLD_MAX_MS * 1000)
+        vTaskDelay(pdMS_TO_TICKS(10));
+    atomic_store(&s_ui_granted, false);
+    atomic_store(&s_ui_busy, false);
+    ++s_ui_pauses;
+    s_ui_pause_ms += (unsigned)((esp_timer_get_time() - t0) / 1000);
 }
 
 static void play_task(void *arg) {
     (void)arg;
     int16_t *buf = heap_caps_malloc(MIC_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    size_t played = 0, short_writes = 0;
+    bool primed = false;  // 已攒够、正在播 / buffered enough and playing
+    // I2S 放空次数只算正在播的区间（每次停下时末尾会多记两三次）。
+    // I2S underflows count only while playing (each stop adds two or three at the tail).
+    uint32_t underflow_mark = 0, underflows = 0;
     while (buf && atomic_load(&s_session)) {
-        const size_t got = xStreamBufferReceive(s_play, buf, MIC_SAMPLES * sizeof(int16_t), pdMS_TO_TICKS(50));
+        if (!primed) {
+            // 服务端边生成边发，速度约等于实时（实测 0.9 倍）：先攒够再播，断了就重新攒，
+            // 宁可停顿一次，也不要一卡一卡。回答已发完时有多少播多少。
+            // The server streams as it generates, at about realtime (0.9x measured): buffer before
+            // playing and again after running dry, so a gap is one pause rather than constant
+            // stutter. Once the reply is complete, play whatever is left.
+            const size_t have = xStreamBufferBytesAvailable(s_play);
+            const size_t need = (size_t)s_prebuffer_ms * AUDIO_RATE / 1000 * sizeof(int16_t);
+            if (have > 0 && (have >= need || !atomic_load(&s_responding))) {
+                primed = true;
+                underflow_mark = metalio_audio_tx_underflows();
+            } else {
+                if (!have && s_st.state == AI_SPEAKING && !atomic_load(&s_responding) && !playing_recently()) {
+                    metalio_audio_set_pa(false);
+                    ai_log("reply played: %u ms, underruns %u, prebuffer %d ms, i2s underflows %u, "
+                           "redraw pauses %u (%u ms), short writes %u",
+                           (unsigned)(played * 1000 / AUDIO_RATE), s_underruns, s_prebuffer_ms, (unsigned)underflows,
+                           s_ui_pauses, s_ui_pause_ms, (unsigned)short_writes);
+                    underflows = 0;
+                    s_ui_pauses = s_ui_pause_ms = 0;
+                    // 这次断过，下次多攒一点。/ It ran dry this time: buffer more next time.
+                    if (s_underruns && s_prebuffer_ms < PREBUFFER_MAX_MS) s_prebuffer_ms += 500;
+                    played = short_writes = 0;
+                    s_underruns = 0;
+                    atomic_store(&s_ui_wants, false);  // 说完了，界面按状态变化自己重绘 / done: the page redraws on the state change
+                    set_state(AI_LISTENING);
+                }
+                // 还没出声（起播前缓冲或断后重攒）：随时可以刷屏。/ Not sounding yet (pre-buffering or rebuffering): redraws are free.
+                grant_redraw_if_wanted();
+                vTaskDelay(pdMS_TO_TICKS(20));
+                continue;
+            }
+        }
+        const size_t got = xStreamBufferReceive(s_play, buf, MIC_SAMPLES * sizeof(int16_t), pdMS_TO_TICKS(20));
         if (got) {
-            metalio_audio_write(buf, got / sizeof(int16_t), pdMS_TO_TICKS(500));
+            const int wrote = metalio_audio_write(buf, got / sizeof(int16_t), pdMS_TO_TICKS(500));
+            played += wrote > 0 ? (size_t)wrote : 0;
+            if (wrote < (int)(got / sizeof(int16_t))) ++short_writes;
             atomic_store(&s_last_play_us, esp_timer_get_time());
             touch();
-        } else if (s_st.state == AI_SPEAKING && !atomic_load(&s_responding) && !playing_recently()) {
-            metalio_audio_set_pa(false);
-            set_state(AI_LISTENING);
+            // 这段以静音结尾 = 语音停顿：在这里放行刷屏，放空的只是停顿。停顿期间的放空不算破音。
+            // This chunk ends in silence, i.e. a pause in speech: grant a redraw here, so only the pause runs
+            // dry. Underflows during that pause are not crackles, so they are left out of the count.
+            if (atomic_load(&s_ui_wants) && tail_quiet(buf, got / sizeof(int16_t))) {
+                const uint32_t before = metalio_audio_tx_underflows();
+                grant_redraw_if_wanted();
+                underflow_mark += metalio_audio_tx_underflows() - before;
+            }
+        } else {
+            // 回答还在来、缓冲却空了：记一次断续并重新攒。/ Reply still coming but the buffer ran dry: count it and rebuffer.
+            if (played && atomic_load(&s_responding)) ++s_underruns;
+            underflows += metalio_audio_tx_underflows() - underflow_mark;
+            primed = false;
         }
     }
     heap_caps_free(buf);
@@ -481,39 +791,145 @@ static void play_task(void *arg) {
 
 // ---------------------------------------------------------------- session
 
+static void log_mem(const char *where) {
+    ai_log("mem %s: internal=%u dma=%u dma_largest=%u", where, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+}
+
+static bool ws_open(void) {
+    static char headers[256];
+    snprintf(headers, sizeof(headers), "Authorization: Bearer %s\r\n", RT_API_KEY);
+    const esp_websocket_client_config_t cfg = {
+        .uri = RT_WS_BASE "?model=" RT_MODEL,
+        .headers = headers,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .disable_auto_reconnect = true,
+        .task_stack = 12 * 1024,
+        .buffer_size = 4096,
+        .network_timeout_ms = 10000,
+    };
+    s_last_cause[0] = 0;
+    atomic_store(&s_ws_connected, false);
+    esp_websocket_client_handle_t ws = esp_websocket_client_init(&cfg);
+    if (!ws) { snprintf(s_last_cause, sizeof(s_last_cause), "内存不足"); return false; }
+    esp_websocket_register_events(ws, WEBSOCKET_EVENT_ANY, ws_event, NULL);
+    xSemaphoreTake(s_send_mtx, portMAX_DELAY);
+    s_ws = ws;
+    xSemaphoreGive(s_send_mtx);
+    if (esp_websocket_client_start(ws) != ESP_OK) {
+        snprintf(s_last_cause, sizeof(s_last_cause), "连接 AI 服务失败");
+        return false;
+    }
+    log_mem("connecting");
+    return true;
+}
+
+// 先拿发送锁再摘下连接：之后不会再有发送用到它，才可以销毁。
+// Take the send lock before detaching the client: once nothing can send on it, it is safe to destroy.
+static void ws_close(void) {
+    xSemaphoreTake(s_send_mtx, portMAX_DELAY);
+    esp_websocket_client_handle_t ws = s_ws;
+    s_ws = NULL;  // 之后到达的事件一律忽略 / later events are ignored
+    xSemaphoreGive(s_send_mtx);
+    if (ws) {
+        esp_websocket_client_close(ws, pdMS_TO_TICKS(1000));
+        esp_websocket_client_destroy(ws);
+    }
+    atomic_store(&s_ws_connected, false);
+}
+
 static void session_end(const char *err) {
     atomic_store(&s_streaming, false);
     atomic_store(&s_session, false);
-    if (s_ws) {
-        esp_websocket_client_handle_t ws = s_ws;
-        esp_websocket_client_close(ws, pdMS_TO_TICKS(1000));
-        s_ws = NULL;  // 之后到达的事件一律忽略 / later events are ignored
-        esp_websocket_client_destroy(ws);
-    }
-    for (int i = 0; i < 100 && atomic_load(&s_workers) > 0; ++i) vTaskDelay(pdMS_TO_TICKS(20));
+    s_retry_at_us = 0;
+    ai_log("session end: %s", err ? err : "(normal)");
+    ws_close();
+    // 录音任务最多阻塞 200 ms，上传任务的发送已被 ws_close 等完。
+    // The mic task blocks at most 200 ms; ws_close already waited out any send in progress.
+    for (int i = 0; i < 150 && atomic_load(&s_workers) > 0; ++i) vTaskDelay(pdMS_TO_TICKS(20));
+    const bool workers_done = atomic_load(&s_workers) == 0;
+    if (!workers_done) ai_log("workers still running after 3 s: keeping their buffers");
     metalio_audio_close();
-    if (s_play) { vStreamBufferDeleteWithCaps(s_play); s_play = NULL; }
-    heap_caps_free(s_rx);
-    s_rx = NULL;
-    heap_caps_free(s_rs_out);
-    s_rs_out = NULL;
+    // 任务没退出就不释放它们还在用的缓冲：宁可漏一次内存，也不能写坏堆。
+    // Buffers still in use by a live task are kept: leaking once beats corrupting the heap.
+    if (workers_done) {
+        if (s_play) { vStreamBufferDeleteWithCaps(s_play); s_play = NULL; }
+        if (s_up_free) { vQueueDeleteWithCaps(s_up_free); s_up_free = NULL; }
+        if (s_up_ready) { vQueueDeleteWithCaps(s_up_ready); s_up_ready = NULL; }
+        heap_caps_free(s_frames);
+        s_frames = NULL;
+        heap_caps_free(s_rx);
+        s_rx = NULL;
+        heap_caps_free(s_rs_out);
+        s_rs_out = NULL;
+        heap_caps_free(s_rs_in);
+        s_rs_in = NULL;
+    }
     atomic_store(&s_responding, false);
+    atomic_store(&s_ui_wants, false);
+    atomic_store(&s_ui_granted, false);
+    atomic_store(&s_ui_busy, false);
+    if (s_ps_saved) {
+        (void)esp_wifi_set_ps(s_prev_ps);
+        s_ps_saved = false;
+    }
     lock();
     s_st.state = AI_IDLE;
-    if (err) snprintf(s_st.error, sizeof(s_st.error), "%s", err);
+    if (err && err != s_st.error) snprintf(s_st.error, sizeof(s_st.error), "%s", err);
     unlock();
     media_net_release_if_unused();
-    ESP_LOGI(TAG, "session ended %s", err ? err : "");
+    // 内存对账：结束后应回到开始前的水平。/ Memory audit: after the end, headroom should be back where it started.
+    const size_t dma = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    ai_log("mem audit: dma %u -> %u (%+d), dma_largest %u -> %u (%+d)%s", (unsigned)s_mem_dma_before, (unsigned)dma,
+           (int)dma - (int)s_mem_dma_before, (unsigned)s_mem_dma_largest_before, (unsigned)largest,
+           (int)largest - (int)s_mem_dma_largest_before,
+           (int)dma + 512 < (int)s_mem_dma_before ? "  <-- NOT RETURNED" : "");
+    log_flush();
+}
+
+// 连接断了：还能重连就稍后重连（麦克风、喇叭、WiFi 都保留），否则结束会话。
+// The connection dropped: reconnect shortly if retries remain (mic, speaker and WiFi stay up), else end.
+static void ws_lost(void) {
+    atomic_store(&s_streaming, false);
+    ws_close();
+    clear_playback();
+    atomic_store(&s_responding, false);
+    const char *cause = s_last_cause[0] ? s_last_cause : "连接已断开";
+    if (!s_auth_failed && s_retries < MAX_RETRIES) {
+        ++s_retries;
+        s_retry_at_us = esp_timer_get_time() + (int64_t)RETRY_DELAY_MS * 1000;
+        ai_log("connection lost (%s); reconnect %d/%d in %d ms", cause, s_retries, MAX_RETRIES, RETRY_DELAY_MS);
+        char msg[sizeof(s_st.error)];
+        snprintf(msg, sizeof(msg), "连接中断，正在重连（%d/%d）…", s_retries, MAX_RETRIES);
+        lock();
+        s_st.state = AI_CONNECTING;
+        snprintf(s_st.error, sizeof(s_st.error), "%s", msg);
+        unlock();
+        return;
+    }
+    char final_err[sizeof(s_last_cause)];
+    snprintf(final_err, sizeof(final_err), "%s", cause);
+    session_end(final_err);
 }
 
 static void session_start(void) {
     if (atomic_load(&s_session)) return;
     s_cancel = false;
+    s_retries = 0;
+    s_retry_at_us = 0;
+    s_auth_failed = false;
+    s_up_dropped = 0;
     lock();
     s_st.state = AI_CONNECTING;
     s_st.user[0] = s_st.reply[0] = s_st.error[0] = 0;
     s_st.mic_peak = 0;
     unlock();
+    s_mem_dma_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    s_mem_dma_largest_before = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    ai_log("=== session start; model %s", RT_MODEL);
+    log_mem("before");
     if (!RT_API_KEY[0]) { session_end("未配置 AI 服务密钥"); return; }
     // 音乐与 AI 不同时用音频和网络。/ Music and AI never share audio and network.
     if (music_active()) music_stop();
@@ -528,41 +944,46 @@ static void session_start(void) {
         if (!media_net_acquire(err, sizeof(err), &s_cancel)) { session_end(s_cancel ? NULL : err); return; }
     }
     if (s_cancel) { session_end(NULL); return; }
+    ai_log("wifi + i2s ready: i2s %d Hz measured %d", metalio_audio_sample_rate(), metalio_audio_actual_rate());
+    log_mem("wifi + i2s");
+    // 实时语音要求上下行都及时：对话期间关闭 WiFi 省电（参考工程与在线升级同样处理），结束时恢复。
+    // Realtime voice needs prompt uplink and downlink: WiFi power saving is off for the chat (as in the
+    // reference project and online update), restored when it ends.
+    if (!s_ps_saved && esp_wifi_get_ps(&s_prev_ps) == ESP_OK && esp_wifi_set_ps(WIFI_PS_NONE) == ESP_OK) s_ps_saved = true;
+    ai_log("wifi power save off: %s (was %d)", s_ps_saved ? "ok" : "failed", (int)s_prev_ps);
     const uint32_t caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     s_rx = heap_caps_malloc(RX_CAP + 1, caps);
     s_rs_out = heap_caps_malloc(RX_CAP, caps);
+    s_rs_in = heap_caps_malloc((RS_TAPS + RX_CAP / 2) * sizeof(int16_t), caps);
+    resampler_reset();
     s_play = xStreamBufferCreateWithCaps(PLAY_RING, 1, caps);
-    if (!s_rx || !s_rs_out || !s_play) { session_end("内存不足"); return; }
-    static char headers[256];
-    snprintf(headers, sizeof(headers), "Authorization: Bearer %s\r\n", RT_API_KEY);
-    const esp_websocket_client_config_t cfg = {
-        .uri = RT_WS_BASE "?model=" RT_MODEL,
-        .headers = headers,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .disable_auto_reconnect = true,
-        .task_stack = 12 * 1024,
-        .buffer_size = 4096,
-        .network_timeout_ms = 10000,
-    };
+    s_frames = heap_caps_malloc(UP_FRAMES * sizeof(up_frame_t), caps);
+    s_up_free = xQueueCreateWithCaps(UP_FRAMES, sizeof(up_frame_t *), caps);
+    s_up_ready = xQueueCreateWithCaps(UP_FRAMES, sizeof(up_frame_t *), caps);
+    if (!s_rx || !s_rs_out || !s_rs_in || !s_play || !s_frames || !s_up_free || !s_up_ready) { session_end("内存不足"); return; }
+    for (int i = 0; i < UP_FRAMES; ++i) {
+        up_frame_t *f = &s_frames[i];
+        xQueueSend(s_up_free, &f, 0);
+    }
     atomic_store(&s_session, true);
     atomic_store(&s_last_play_us, 0);
     touch();
-    s_ws = esp_websocket_client_init(&cfg);
-    if (!s_ws) { session_end("内存不足"); return; }
-    esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, ws_event, NULL);
-    if (esp_websocket_client_start(s_ws) != ESP_OK) { session_end("连接 AI 服务失败"); return; }
-    atomic_store(&s_workers, 2);
-    if (xTaskCreatePinnedToCoreWithCaps(mic_task, "ai_mic", 6 * 1024, NULL, 5, NULL, 1, caps) != pdPASS) atomic_fetch_sub(&s_workers, 1);
-    if (xTaskCreatePinnedToCoreWithCaps(play_task, "ai_play", 4 * 1024, NULL, 6, NULL, 1, caps) != pdPASS) atomic_fetch_sub(&s_workers, 1);
-    ESP_LOGI(TAG, "connecting; internal=%u dma=%u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+    // 先起工作任务再连接：首次连接失败转入重连时它们也已就位（未就绪前它们什么都不做）。
+    // Workers start before connecting, so they are in place even when the first attempt fails into a
+    // reconnect (they idle until the session is ready).
+    atomic_store(&s_workers, 3);
+    if (xTaskCreatePinnedToCoreWithCaps(mic_task, "ai_mic", 6 * 1024, NULL, 6, NULL, 1, caps) != pdPASS) atomic_fetch_sub(&s_workers, 1);
+    if (xTaskCreatePinnedToCoreWithCaps(upload_task, "ai_up", 6 * 1024, NULL, 5, NULL, 1, caps) != pdPASS) atomic_fetch_sub(&s_workers, 1);
+    if (xTaskCreatePinnedToCoreWithCaps(play_task, "ai_play", 6 * 1024, NULL, 6, NULL, 1, caps) != pdPASS) atomic_fetch_sub(&s_workers, 1);
+    if (atomic_load(&s_workers) != 3) { session_end("内存不足"); return; }
+    if (!ws_open()) ws_lost();
 }
 
 static void ctl_task(void *arg) {
     (void)arg;
     cmd_t cmd;
     for (;;) {
-        if (xQueueReceive(s_cmds, &cmd, pdMS_TO_TICKS(500)) == pdTRUE) {
+        if (xQueueReceive(s_cmds, &cmd, pdMS_TO_TICKS(200)) == pdTRUE) {
             switch (cmd) {
             case CMD_START: session_start(); break;
             // 会话可能已结束、音乐已接手音频：只在 AI 仍在进行时收尾。/ The chat may be over with music owning audio; end only a live chat.
@@ -580,8 +1001,16 @@ static void ctl_task(void *arg) {
                 } else session_end(NULL);
                 break;
             case CMD_CONFIGURE: send_session_update(); break;
-            case CMD_WS_END: if (atomic_load(&s_session)) session_end(s_st.error[0] ? s_st.error : "连接已断开"); break;
+            // 一次断线会先后收到 ERROR 与 DISCONNECTED：已摘下连接就忽略后面的。
+            // One drop brings both ERROR and DISCONNECTED: once the client is detached, ignore the rest.
+            case CMD_WS_END: if (atomic_load(&s_session) && s_ws) ws_lost(); break;
             }
+        }
+        // 到点重连。/ Reconnect when due.
+        if (atomic_load(&s_session) && !s_ws && s_retry_at_us && esp_timer_get_time() >= s_retry_at_us) {
+            s_retry_at_us = 0;
+            ai_log("reconnecting (%d/%d)", s_retries, MAX_RETRIES);
+            if (!ws_open()) ws_lost();
         }
         // 空闲超时：没人说话、也没在回答。/ Idle timeout: no speech and no reply.
         if (atomic_load(&s_session) && atomic_load(&s_streaming) && !atomic_load(&s_responding) && !playing_recently() &&
@@ -603,7 +1032,10 @@ esp_err_t ai_init(void) {
     if (s_cmds) return ESP_OK;
     s_lock = xSemaphoreCreateMutex();
     s_cmds = xQueueCreate(8, sizeof(cmd_t));
-    return s_lock && s_cmds ? ESP_OK : ESP_ERR_NO_MEM;
+    s_send_mtx = xSemaphoreCreateMutex();
+    resampler_init();
+    s_log = heap_caps_malloc(LOG_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);  // 失败只是不记日志 / failure only disables the log
+    return s_lock && s_cmds && s_send_mtx ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 // 控制任务会启动 WiFi（关缓存时读写 NVS），栈必须在主内部 RAM。/ The control task starts WiFi (NVS with the cache off), so its stack must be main internal RAM.
@@ -646,5 +1078,13 @@ void ai_get_status(ai_status_t *out) {
     *out = s_st;
     xSemaphoreGive(s_lock);
 }
+
+bool ai_redraw_slot(void) {
+    if (atomic_exchange(&s_ui_granted, false)) return true;  // 播放正停在停顿处等着 / playback is holding at a pause
+    atomic_store(&s_ui_wants, true);
+    return false;
+}
+
+void ai_redraw_done(void) { atomic_store(&s_ui_busy, false); }
 
 bool ai_active(void) { return atomic_load(&s_session) || s_st.state != AI_IDLE; }

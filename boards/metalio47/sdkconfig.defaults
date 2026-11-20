@@ -89,13 +89,15 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
 # 使用SDK交叉签名验证，保留真实证书有效期/主机名检查，不添加废弃根。 / Use SDK cross-signed validation without deprecated roots or bypassing real certificate checks.
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
-# 原版因内部 DMA 内存不足而关掉硬件 AES/SHA。腾出约 22 KB 内部 RAM 后重新打开：软件 AES 跟不上
-# AI 回复语音（约 64 KB/s 的 wss 数据），也拖慢微信读书的 HTTPS 下载。
-# Stock disabled hardware AES/SHA for lack of internal DMA RAM. With ~22 KB of internal RAM reclaimed
-# they are back on: software AES cannot keep up with AI reply audio (~64 KB/s over wss) and slows
-# WeRead's HTTPS downloads.
-CONFIG_MBEDTLS_HARDWARE_SHA=y
-CONFIG_MBEDTLS_HARDWARE_AES=y
+# TLS on S31 must remain usable when Wi-Fi and the panel hold internal DMA buffers.
+# 保持原版的软件 AES/SHA。硬件 AES 处理 PSRAM 里未对齐的 TLS 记录时，每次要临时借约 1.6 KB 内部 DMA
+# 中转缓冲；AI 对话时 WiFi + 墨水屏 + I2S 已把内部 DMA 用到连 1.6 KB 连续块都没有，实测第一句语音
+# 就报 “esp-aes: Failed to allocate memory” 断线。
+# Keep the stock software AES/SHA. Hardware AES borrows a ~1.6 KB internal-DMA bounce buffer for every
+# unaligned TLS record in PSRAM; during an AI chat WiFi + panel + I2S leave not even 1.6 KB contiguous,
+# and the first utterance failed on-device with "esp-aes: Failed to allocate memory".
+# CONFIG_MBEDTLS_HARDWARE_SHA is not set
+# CONFIG_MBEDTLS_HARDWARE_AES is not set
 CONFIG_IDF_TARGET="esp32s31"
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y

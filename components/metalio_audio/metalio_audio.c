@@ -20,6 +20,7 @@
 
 #include "driver/i2s_std.h"
 #include "driver/uart.h"
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -52,6 +53,7 @@ static int s_actual_rate;             // 实测的 BH 时钟 / measured BH clock
 static _Atomic int s_volume = 70;
 static _Atomic bool s_pa_on;
 static int32_t *s_txbuf, *s_rxbuf;      // CHUNK_FRAMES*2 槽 / slots each（发送按 int16 用 / TX used as int16）
+static volatile uint32_t s_tx_underflows;  // 只由中断递增 / incremented by the ISR only
 static bool s_capture;                  // 当前是否开了麦克风通道 / microphone channel open
 static bool s_tx32;                     // 发送用 32 位数据（与麦克风同开时）/ TX uses 32-bit data (when the mic is open)
 
@@ -238,6 +240,17 @@ static int measure_rate_locked(void) {
     return rate;
 }
 
+// 发送队列满 = 所有 DMA 缓冲都已发完而没有新数据。/ A full send queue means every DMA buffer went out with no new data.
+static IRAM_ATTR bool on_tx_underflow(i2s_chan_handle_t handle, i2s_event_data_t *event, void *ctx) {
+    (void)handle;
+    (void)event;
+    (void)ctx;
+    ++s_tx_underflows;
+    return false;
+}
+
+uint32_t metalio_audio_tx_underflows(void) { return s_tx_underflows; }
+
 static void close_locked(void) {
     if (s_tx) { (void)i2s_channel_disable(s_tx); (void)i2s_del_channel(s_tx); s_tx = NULL; }
     if (s_rx) { (void)i2s_channel_disable(s_rx); (void)i2s_del_channel(s_rx); s_rx = NULL; }
@@ -308,6 +321,10 @@ esp_err_t metalio_audio_open(int sample_rate, bool capture) {
     if (err == ESP_OK && s_rx) {
         std_config(&std, sample_rate, I2S_DATA_BIT_WIDTH_32BIT);
         err = i2s_channel_init_std_mode(s_rx, &std);
+    }
+    if (err == ESP_OK) {
+        const i2s_event_callbacks_t cbs = {.on_send_q_ovf = on_tx_underflow};
+        err = i2s_channel_register_event_callback(s_tx, &cbs, NULL);
     }
     if (err == ESP_OK) err = i2s_channel_enable(s_tx);
     if (err == ESP_OK && s_rx) err = i2s_channel_enable(s_rx);

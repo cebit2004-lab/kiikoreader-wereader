@@ -37,6 +37,7 @@ static void go_back(app_ctx_t *ctx) {
     g_apps_origin = NULL;
 }
 
+static bool s_redraw_granted;  // 刚按语音停顿放行过一次刷屏 / a redraw was just granted at a pause in speech
 static unsigned s_drawn_rev;
 static ai_state_t s_drawn_state;
 static int64_t s_drawn_ms;
@@ -55,8 +56,11 @@ static const char *state_text(ai_state_t st) {
     }
 }
 
-// 按宽度把 UTF-8 文本折成多行，返回行数；starts/lens 记录每行起点与长度。
-// Wrap UTF-8 text to a width; returns the line count, with each line's start and length.
+// 按宽度把 UTF-8 文本折成多行，返回行数；starts/lens 记录每行起点与长度。px 须是实际绘制字号
+// （ui_text 会按字号设置放大，量宽必须用同一字号，否则右侧溢出）。
+// Wrap UTF-8 text to a width; returns the line count, with each line's start and length. px must be
+// the size actually drawn (ui_text scales by the font-size setting; measuring at another size overflows
+// the right edge).
 static int wrap_lines(const char *text, int px, int width, int *starts, int *lens, int max) {
     int count = 0;
     const int len = (int)strlen(text);
@@ -91,8 +95,9 @@ static int wrap_lines(const char *text, int px, int width, int *starts, int *len
 // 在区域内画折行文字；放不下且 tail 为真时显示末尾。/ Draw wrapped text in a box; on overflow, tail shows the end.
 static void draw_wrapped(uint8_t *fb, EpdRect box, int px, const char *text, bool tail) {
     static int starts[MAX_LINES], lens[MAX_LINES];
-    const int count = wrap_lines(text, px, box.width, starts, lens, MAX_LINES);
-    const int line_h = px * 3 / 2;
+    const int drawn_px = ui_text_effective_px(px);  // ui_text 实际使用的字号 / the size ui_text really draws at
+    const int count = wrap_lines(text, drawn_px, box.width, starts, lens, MAX_LINES);
+    const int line_h = drawn_px * 3 / 2;
     const int fit = box.height / line_h;
     const int first = tail && count > fit ? count - fit : 0;
     char line[512];
@@ -135,7 +140,7 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
 
     // AI 回答。/ The reply.
     ui_text(fb, 36, REPLY_TOP, 24, "AI", EPD_DRAW_ALIGN_LEFT, false);
-    if (st.error[0]) draw_wrapped(fb, (EpdRect){36, REPLY_TOP + 40, 612, 120}, 28, st.error, false);
+    if (st.error[0]) draw_wrapped(fb, (EpdRect){36, REPLY_TOP + 40, 612, 180}, 28, st.error, false);
     else draw_wrapped(fb, (EpdRect){36, REPLY_TOP + 40, 612, REPLY_BOTTOM - REPLY_TOP - 40}, 30, st.reply, true);
 
     // 按钮。/ Buttons.
@@ -179,12 +184,29 @@ static app_redraw_t on_key_long(app_ctx_t *ctx, int key) {
 }
 
 static app_redraw_t on_tick(app_ctx_t *ctx) {
+    // 上一次放行的刷屏已经同步推完屏，让播放继续。/ The granted redraw has been pushed synchronously; let playback resume.
+    if (s_redraw_granted) {
+        s_redraw_granted = false;
+        ai_redraw_done();
+    }
     ai_status_t st;
     ai_get_status(&st);
     if (st.revision == s_drawn_rev) return APP_REDRAW_NONE;
-    // 状态变了立即重绘；只是文字增长就限速。/ Redraw at once on a state change; throttle text growth.
-    if (st.state != s_drawn_state || ctx->now_ms - s_drawn_ms >= REDRAW_MIN_MS) return APP_REDRAW_PAGE;
-    return APP_REDRAW_NONE;
+    // 状态变了立即重绘。/ Redraw at once on a state change.
+    if (st.state != s_drawn_state) return APP_REDRAW_PAGE;
+    if (ctx->now_ms - s_drawn_ms < REDRAW_MIN_MS) return APP_REDRAW_NONE;  // 文字增长限速 / throttle text growth
+    // AI 说话时，文字更新要等语音停顿：墨水屏刷新时驱动在两个核上跑最高优先级送数任务约 0.1–0.3 秒，
+    // 播放供不上 I2S（DMA 只有 30 ms 余量），落在发声处就破音，落在停顿里只是停顿稍长。
+    // 开口那次状态刷新在起播前的预缓冲里，本来就不出声。
+    // While the AI speaks, text updates wait for a pause in speech: an e-paper refresh runs top-priority
+    // feed tasks on both cores for ~0.1–0.3 s and playback cannot feed I2S (30 ms of DMA), so a refresh
+    // during sound crackles while one in a pause just lengthens it. The state-change redraw at the start
+    // happens during pre-playback buffering, which is silent anyway.
+    if (st.state == AI_SPEAKING) {
+        if (!ai_redraw_slot()) return APP_REDRAW_NONE;
+        s_redraw_granted = true;  // 下一次 tick 通知播放继续 / tell playback to resume on the next tick
+    }
+    return APP_REDRAW_PAGE;
 }
 
 static void on_enter(app_ctx_t *ctx) { (void)ctx; s_drawn_rev = 0; }
@@ -192,6 +214,10 @@ static void on_enter(app_ctx_t *ctx) { (void)ctx; s_drawn_rev = 0; }
 // 离开页面就结束对话，不在后台占着网络和麦克风。/ Leaving the page ends the chat; nothing lingers on the network or mic.
 static void ai_exit(app_ctx_t *ctx) {
     (void)ctx;
+    if (s_redraw_granted) {  // 别让播放白等 / do not leave playback waiting
+        s_redraw_granted = false;
+        ai_redraw_done();
+    }
     ai_stop();
 }
 

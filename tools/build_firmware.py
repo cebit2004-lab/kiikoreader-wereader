@@ -276,7 +276,10 @@ def build_one(board, args):
                   'CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS':'48','CONFIG_LWIP_TCP_SACK_OUT':'y','CONFIG_LWIP_TCP_SND_BUF_DEFAULT':'32768',
                   'CONFIG_LWIP_TCPIP_RECVMBOX_SIZE':'64','CONFIG_LWIP_TCP_MSS':'1440',
                   'CONFIG_ESP_WIFI_AMPDU_TX_ENABLED':'y','CONFIG_ESP_WIFI_AMPDU_RX_ENABLED':'y',
-                  'CONFIG_ESP_WIFI_TX_BA_WIN':'64','CONFIG_LWIP_SO_RCVBUF':'y'}
+                  'CONFIG_ESP_WIFI_TX_BA_WIN':'64','CONFIG_LWIP_SO_RCVBUF':'y',
+                  # 软件 AES/SHA：TLS 不向内部 DMA 借中转缓冲（见 sdkconfig.defaults）。
+                  # Software AES/SHA: TLS borrows no internal-DMA bounce buffers (see sdkconfig.defaults).
+                  'CONFIG_MBEDTLS_HARDWARE_AES':'n','CONFIG_MBEDTLS_HARDWARE_SHA':'n'}
         lines=[line for line in lines if not any(line.startswith(key+'=') or line=='# '+key+' is not set' for key in transfer)]
         path.write_text('\n'.join(lines+[key+'=y' for key in required]+
                                   [key+'='+value for key,value in transfer.items()])+'\n')

@@ -49,6 +49,10 @@ bool metalio_audio_is_open(void);
 /// 打开时实测的 BH 时钟（帧/秒）；AT+SAMPLE 不生效时与请求值不同。
 /// BH clock measured at open (frames/s); differs from the request when AT+SAMPLE has no effect.
 int metalio_audio_actual_rate(void);
+// 发送 DMA 放空（写得不够快、补了静音）的累计次数；空闲时也会增长，按播放前后差值看。
+// Running count of TX DMA underflows (writes fell behind and silence went out); it also grows while
+// idle, so compare it before and after playback.
+uint32_t metalio_audio_tx_underflows(void);
 
 /// 播放单声道 16 位样本，返回写入样本数（<0 出错）。会自动打开功放。
 /// Play mono 16-bit samples; returns samples written (<0 on error). Turns the amplifier on.
