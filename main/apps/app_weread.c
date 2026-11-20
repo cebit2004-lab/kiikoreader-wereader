@@ -1,3 +1,4 @@
+#include "esp_attr.h"
 #include "app_weread.h"
 
 #include <stdio.h>
@@ -51,7 +52,9 @@ static bool s_check_pending;
 static int64_t s_session_verified_us;
 static int s_page, s_count;
 static unsigned s_selected_index;
-static wr_book_t s_books[WR_SLOTS], s_selected;
+// 书架条目只在界面任务里用，放 PSRAM。/ Shelf entries are UI-task only; keep them in PSRAM.
+static EXT_RAM_BSS_ATTR wr_book_t s_books[WR_SLOTS];
+static EXT_RAM_BSS_ATTR wr_book_t s_selected;
 /*
  * 书架的缓存状态不再只有"有/没有"两档：分章缓存的书可能只下了一部分。
  * 逐本逐章 stat 太重，所以读后台维护的概况文件（已就绪章数 / 全书章数）。

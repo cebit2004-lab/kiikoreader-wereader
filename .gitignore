@@ -131,3 +131,8 @@ Desktop.ini
 # 两板内建扩展字库。/ Expanded embedded assets for both boards.
 !boards/metalio47/src/main/assets/builtin.ttf
 !boards/metalio47/src/main/assets/ui-hanzi.bin
+
+# 网易云点歌服务的本地令牌 / Local token for the NetEase song server
+components/kiiko_media/music_secrets.h
+.dev/
+components/kiiko_media/ai_secrets.h

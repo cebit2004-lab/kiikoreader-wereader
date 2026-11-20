@@ -58,6 +58,8 @@
 #else
 #endif
 #include "auto_lock.h"
+#include "music_player.h"
+#include "ai_voice.h"
 #include "crash_note.h"
 
 #include <string.h>
@@ -727,6 +729,16 @@ static void ai_dismiss(app_ctx_t *ctx,const app_desc_t *current,bool present){
 static app_redraw_t ai_short_action(app_ctx_t *ctx,const app_desc_t *current){
     app_ai_action_t action=app_settings_ai_short();
     if(action==APP_AI_NONE)return APP_REDRAW_NONE;
+    // AI 助手：在 AI 页按键开始/打断/结束；在别的页先跳到 AI 页并开始对话。
+    // AI assistant: on its page the key starts/interrupts/ends; elsewhere it opens the page and starts a chat.
+    if(action==APP_AI_ASSISTANT){
+        extern const app_desc_t app_ai;
+        ESP_LOGI(TAG,"AI key short: assistant (active=%d)",ai_active());
+        (void)metalio_haptic_click();
+        if(current==&app_ai||ai_active())ai_toggle();
+        else{extern const app_desc_t *g_apps_origin;g_apps_origin=NULL;ai_start();ctx->request_app=&app_ai;}
+        return APP_REDRAW_NONE;
+    }
     if(action==APP_AI_BOOKMARK){
         if(current!=&app_book || !app_book_reader_body_visible())return APP_REDRAW_NONE;
         if(app_book_ai_bookmark())(void)metalio_haptic_click();
@@ -1227,7 +1239,14 @@ void app_loop_run(const app_loop_config_t* config) {
                 else if(choice>=0){
                     last_input_ms=ctx.now_ms;
                     if(app_settings_set_ai_short((app_ai_action_t)choice)==ESP_OK){
+                        ESP_LOGI(TAG,"AI key short action set to %d",choice);
                         ai_dismiss(&ctx,current,true);
+                        // 选了「AI 助手」就直接开始对话，免得还要再按一次。/ Choosing "AI assistant" starts a chat at once.
+                        if(choice==APP_AI_ASSISTANT){
+                            extern const app_desc_t app_ai;
+                            ai_start();
+                            if(current!=&app_ai){extern const app_desc_t *g_apps_origin;g_apps_origin=NULL;ctx.request_app=&app_ai;}
+                        }
                     }else ai_push(&ctx,current,ui_ai_menu_save_error(&s_ai,ctx.fb));
                 }
             }
@@ -1767,7 +1786,8 @@ void app_loop_run(const app_loop_config_t* config) {
         if (ble_input != last_ble_input) { last_ble_input = ble_input; last_input_ms = ctx.now_ms; }
         unsigned requested_idle = app_settings_auto_lock_minutes();
 #if KIIKO_BOARD_METALIO47
-        bool idle_blocked = app_sd_recovery_busy() || usb_storage_active() || app_download_active() || wifi_busy || current == &app_transfer ||
+        // 播放音乐时不自动锁屏（锁屏会停掉 WiFi 与 I2S）。/ No idle lock during music: locking stops WiFi and I2S.
+        bool idle_blocked = app_sd_recovery_busy() || usb_storage_active() || app_download_active() || wifi_busy || music_active() || ai_active() || current == &app_transfer ||
 #else
         bool idle_blocked = usb_storage_active() || wifi_busy || current == &app_transfer ||
 #endif

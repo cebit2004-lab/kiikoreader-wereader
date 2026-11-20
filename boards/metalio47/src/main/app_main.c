@@ -11,6 +11,11 @@
  * is unset, the factory page blocks first. Then control goes to app_loop.
  */
 
+#include "metalio_audio.h"
+#include "music_player.h"
+#include "ai_voice.h"
+#include "esp_heap_caps.h"
+#include "freertos/idf_additions.h"
 #include <stdint.h>
 #include <string.h>
 #include <sys/time.h>
@@ -173,6 +178,11 @@ void app_main(void) {
     read_pico_handle_t hw;
     if (read_pico_init(&hw) != ESP_OK) return;
     rp_boot_mark("hw");
+    // 板载音频：只建锁与 PSRAM 缓冲，BH1098G 在首次播放时才切到本机音频模式。
+    // On-board audio: locks and PSRAM buffers only; the BH1098G switches to local audio on first use.
+    if (metalio_audio_init() != ESP_OK) ESP_LOGW(TAG, "audio init failed");
+    if (music_init() != ESP_OK) ESP_LOGW(TAG, "music init failed");
+    if (ai_init() != ESP_OK) ESP_LOGW(TAG, "ai init failed");
     if (hw.pmu_ready) {
         restore_time_from_pmu();
         // 快充开关按保存的偏好立即生效；驱动未就绪时保持初始化时的标准电流。

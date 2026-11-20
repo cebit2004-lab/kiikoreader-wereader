@@ -12,6 +12,10 @@
 extern const app_desc_t app_book;
 #if KIIKO_BOARD_METALIO47
 extern const app_desc_t app_weread;
+extern const app_desc_t app_apps;
+extern const app_desc_t app_music;
+extern const app_desc_t app_vocab;
+extern const app_desc_t app_ai;
 #endif
 extern const app_desc_t app_image;
 extern const app_desc_t app_cloud_sync;
@@ -26,11 +30,17 @@ static const app_desc_t* const s_apps[] = {
     &app_book,
 #if KIIKO_BOARD_METALIO47
     &app_weread,
+    &app_apps,
 #endif
     &app_files,
     &app_device_settings,
     &app_image,
     &app_cloud_sync,
+#if KIIKO_BOARD_METALIO47
+    &app_music,
+    &app_vocab,
+    &app_ai,
+#endif
 };
 
 #define APP_COUNT ((int)(sizeof(s_apps) / sizeof(s_apps[0])))

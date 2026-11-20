@@ -72,17 +72,21 @@ typedef struct {
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 enum { WR_WORKER_STACK_BYTES = 16 * 1024, WR_HTTP_URL_BYTES = 2080 };
-// 缓存和上报都会写闪存，任务栈必须位于内部 RAM。/ Both cache and report write flash, so the task stack must reside in internal RAM.
+// 缓存和上报都会写闪存，任务栈必须位于内部 RAM。不能放 RTC 内存：它挂在低功耗总线上，
+// 软件 TLS 握手在那里要 5 秒以上（实测）。
+// Both cache and report write flash, so the task stack must reside in internal RAM. Not RTC memory:
+// it sits on the low-power bus and a software TLS handshake there takes over 5 s (measured).
 static DRAM_ATTR StackType_t s_worker_stack[WR_WORKER_STACK_BYTES / sizeof(StackType_t)];
 static DRAM_ATTR StaticTask_t s_worker_tcb;
 static TaskHandle_t s_worker;
-static wr_work_t s_work;
+// 以下状态只在任务上下文读写，放 PSRAM 以腾出内部 RAM。/ Task-context state below lives in PSRAM to free internal RAM.
+static EXT_RAM_BSS_ATTR wr_work_t s_work;
 /* 用户任务插队：后台预取正在跑时，同步/缓存/进度这类用户动作先登记在这里，
  * 预取收到取消后立即接着执行——界面不必再弹"请等待当前操作完成"。
  * User jobs jump the queue: while a background prefetch runs, sync/cache/progress are parked
  * here and run as soon as the prefetch backs off, so the UI never has to say "wait for the
  * current operation". */
-static wr_work_t s_queued;
+static EXT_RAM_BSS_ATTR wr_work_t s_queued;
 static bool s_queued_pending;
 /* 预取被"worker 正忙"挡下时记在这里，本轮任务收尾后由 worker 自己补跑。
  * 没有这个登记位，被挡下的请求就永远丢了：等待页空转到 6 秒，只能提示读者退出重进。
@@ -96,8 +100,8 @@ static unsigned s_prefetch_first;
  * 不该再为一份 700 字节的任务参数增加栈深。只有一个 worker，因此不需要加锁。
  * The retry descriptor lives in static storage: the worker stack already carries 4 KB URL
  * buffers and parse context, so a 700-byte descriptor should not deepen it. One worker only. */
-static wr_work_t s_retry_prefetch;
-static wr_report_t s_reports[8];
+static EXT_RAM_BSS_ATTR wr_work_t s_retry_prefetch;
+static EXT_RAM_BSS_ATTR wr_report_t s_reports[8];
 static bool s_work_pending;
 static bool s_processing_report;
 static bool s_reader_scanning;
@@ -144,7 +148,7 @@ static struct {
     char chapter[WR_ID];
     wr_reader_t fields;
     int64_t expires;
-} s_report_fields;
+} s_report_fields EXT_RAM_BSS_ATTR;
 // Each HTTP request owns redirect and cookie-capture state, so bounded cache
 // prefetch requests can overlap without corrupting one another.
 typedef struct {
@@ -169,7 +173,7 @@ static atomic_bool s_cancel;
 static unsigned s_done, s_total;
 static char s_qr[180];
 static wr_account_t s_http_account;
-static char s_cookies[1024];
+static EXT_RAM_BSS_ATTR char s_cookies[1024];
 static _Atomic bool s_expired;
 static _Atomic bool s_http_open_failed;
 static _Atomic(const char *) s_error_message = "操作失败，请检查网络后重试";
@@ -185,7 +189,7 @@ static struct {
     uint32_t ms;
     unsigned chapter, offset, pct;
     bool attached;
-} s_reading;
+} s_reading EXT_RAM_BSS_ATTR;
 static bool s_radio_held;
 static int s_radio_jobs;      // 正在跑的后台网络任务数 / Background network jobs in flight
 static bool s_radio_session;  // 阅读会话要求常收 / Reading session wants always-on RX

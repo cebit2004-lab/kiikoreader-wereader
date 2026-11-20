@@ -5,6 +5,8 @@ set(main_requires
     kiiko_board
     read_pico
     metalio_hw
+    metalio_audio
+    kiiko_media
     read_pico_transfer
     read_pico_search
     espressif__qrcode
@@ -95,6 +97,10 @@ kiiko_board_sources(kiiko_selected_sources "${CMAKE_CURRENT_LIST_DIR}" "app_main
         "ui/ui_reader_background.c"
         "apps/app_book.c"
         "apps/app_weread.c"
+        "apps/app_apps.c"
+        "apps/app_music.c"
+        "apps/app_vocab.c"
+        "apps/app_ai.c"
         "apps/book_toc.c"
         "apps/app_dashboard.c"
         "apps/app_files.c"

@@ -7,6 +7,9 @@
  * Frozen: Firmware and host never mount SD together, including host eject; never auto-format.
  */
 #include "usb_storage.h"
+#include "music_player.h"
+#include "ai_voice.h"
+#include "esp_heap_caps.h"
 #include "ui_avatar.h"
 #include "book_cover_jobs.h"
 #include "book_lock_collage.h"
@@ -106,6 +109,16 @@ esp_err_t usb_storage_start(void) {
     if (s_active) return ESP_OK;
     read_pico_sd_info_t info = {0};
     if (read_pico_sd_get_info(&info) != ESP_OK || !info.mounted) return ESP_ERR_INVALID_STATE;
+    // 音乐正从卡上读文件：先停播放并释放音频，电脑接管前本机不能再碰卡。
+    // Music reads from the card: stop it and release audio before the host takes the card over.
+    if (music_active()) music_stop();
+    if (ai_active()) {
+        ai_stop();
+        for (int i = 0; i < 150 && ai_active(); ++i) vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    ESP_LOGI(TAG, "USB start: internal DMA free=%u largest=%u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
     // 字体文件在 SD 上，先关闭句柄再卸载。/ Close the SD-backed font before unmounting.
     if (!ttf_font_is_builtin()) ttf_font_open_builtin();
     esp_err_t err = read_pico_sd_usb_acquire(&s_card);

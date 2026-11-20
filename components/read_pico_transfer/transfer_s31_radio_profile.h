@@ -15,7 +15,17 @@
  * ACKs never reach the router and TCP can only retransmit — a 3 MB bundle moved 573 KB in 120 s.
  * 72 (18 dBm) stays inside the 20 dBm EIRP limit and is the most direct fix for that stall.
  */
-#define TRANSFER_S31_MAX_TX_POWER 72
+/*
+ * 改回官方的 48（12 dBm）：在 Metalio E-INK4 Plus 上 72（18 dBm）的发射电流尖峰会触发欠压复位
+ * （扫描 WiFi 即重启，reset_reason=9，满电亦然）。代价是远距离公网下载会慢一些。
+ * Back to the documented 48 (12 dBm): on the Metalio E-INK4 Plus, 72 (18 dBm) TX current spikes
+ * trip the brownout reset (a WiFi scan reboots it, reset_reason=9, even fully charged). The cost is
+ * slower downloads far from the router.
+ */
+/* 试验：60（15 dBm）介于官方 48 与 72 之间，看能否在不欠压的前提下减轻上行丢包导致的下载卡顿。
+ * Trial: 60 (15 dBm) sits between the documented 48 and 72, to ease uplink-loss download stalls
+ * without tripping the brownout reset. */
+#define TRANSFER_S31_MAX_TX_POWER 60
 // Short STA sessions (network scan, time sync and low-RAM connection starts) do
 // not need an AP receive aggregation window. Keep their DMA-backed RX footprint
 // small enough for the S31's 64 KiB internal allocation reserve.

@@ -1,6 +1,6 @@
 // 中文：角标在成品封面缓存之后实时绘制；只用一个1792B字形遮罩，不新增整帧或TF文件。
 // English: Paint badges live after cached artwork, using one1792-byte glyph mask, without another frame or SD file.
-static uint8_t s_shelf_read_mask[64*28];
+static EXT_RAM_BSS_ATTR uint8_t s_shelf_read_mask[64*28];
 static bool s_shelf_read_ready;
 static int s_shelf_read_x,s_shelf_read_y,s_shelf_read_w,s_shelf_read_h;
 static bool shelf_read_mask_prepare(void){

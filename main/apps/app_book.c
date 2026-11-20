@@ -154,6 +154,7 @@
  */
 #if KIIKO_BOARD_METALIO47
 #ifdef ESP_PLATFORM
+#include "esp_attr.h"
 #include "ui_locale_format.h"
 #endif
 #include "ui_reader_layout.h"
@@ -402,7 +403,7 @@ static bool shelf_category_matches(const char *path);
 static int shelf_category_add(const char *path);
 static app_redraw_t shelf_category_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev);
 static bool s_reader_favorite;
-static shelf_entry_t s_managed;
+static EXT_RAM_BSS_ATTR shelf_entry_t s_managed;
 static bool s_delete_confirm, s_file_removed;
 static char s_shelf_warning[128], s_manage_message[128];
 static char s_query[65], s_search_draft[65], s_batch_message[128];
@@ -4295,7 +4296,7 @@ static void draw_reader_footnote_card(uint8_t *fb, size_t page, EpdRect body) {
     // Cross-file notes carry their own text; same-chapter notes slice the body.
     if (!note->owned_text && note->text_start + note->text_len > s_text_len) return;
     const char *note_src = note->owned_text ? note->owned_text : s_text + note->text_start;
-    static char text[1024];
+    static EXT_RAM_BSS_ATTR char text[1024];
     // 注释里常夹零宽字符（U+200B 等），直接画会变成缺字方框；先清洗掉再折行。
     // EPUB notes often carry zero-width characters (U+200B etc.); drawing them raw shows tofu
     // boxes, so strip them before wrapping.

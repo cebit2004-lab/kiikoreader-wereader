@@ -112,6 +112,7 @@ static void status_fit_signature(char *text, int width) {
 static const char *const labels[] = {"首页", "书架",
 #if KIIKO_BOARD_METALIO47
     "微信读书",
+    "应用",
 #endif
     "文件管理", "设置"};
 static int s_power_signature=-1000;
@@ -151,6 +152,7 @@ static void icon(uint8_t *fb, int tab, int cx, int y) {
         UI_ICON_HOUSE, UI_ICON_LIBRARY_BIG,
 #if KIIKO_BOARD_METALIO47
         UI_ICON_BOOK_OPEN,
+        UI_ICON_LAYOUT_GRID,
 #endif
         UI_ICON_FOLDER_OPEN, UI_ICON_SLIDERS_HORIZONTAL,
     };
