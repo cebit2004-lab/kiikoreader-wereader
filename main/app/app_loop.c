@@ -1765,6 +1765,11 @@ void app_loop_run(const app_loop_config_t* config) {
         if (!power_dialog_open && !s_quick.open && !quick_input_owned && !menu_open &&
             !current->holds_pmu && !usb_storage_active() && !touch.touched &&
             !ui_click_feedback_active() && !ctx.request_app && !ctx.request_menu && !ctx.request_return &&
+#if KIIKO_BOARD_METALIO47
+            // AI 回答期间推迟电量刷新：喇叭负载会让电量读数跳动，刷屏落在发声处就破音。
+            // Defer battery refreshes during an AI reply: speaker load makes the reading jump, and a refresh during sound crackles.
+            !ai_audio_busy() &&
+#endif
             (current!=&app_book||app_book_status_bar_visible())&&ui_nav_refresh_power(ctx.fb)) {
 #if KIIKO_BOARD_METALIO47
             bool previous=display_system_binary_set(app_binary_ui(&ctx,current));

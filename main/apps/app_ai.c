@@ -192,20 +192,20 @@ static app_redraw_t on_tick(app_ctx_t *ctx) {
     ai_status_t st;
     ai_get_status(&st);
     if (st.revision == s_drawn_rev) return APP_REDRAW_NONE;
-    // 状态变了立即重绘。/ Redraw at once on a state change.
-    if (st.state != s_drawn_state) return APP_REDRAW_PAGE;
-    if (ctx->now_ms - s_drawn_ms < REDRAW_MIN_MS) return APP_REDRAW_NONE;  // 文字增长限速 / throttle text growth
-    // AI 说话时，文字更新要等语音停顿：墨水屏刷新时驱动在两个核上跑最高优先级送数任务约 0.1–0.3 秒，
-    // 播放供不上 I2S（DMA 只有 30 ms 余量），落在发声处就破音，落在停顿里只是停顿稍长。
-    // 开口那次状态刷新在起播前的预缓冲里，本来就不出声。
-    // While the AI speaks, text updates wait for a pause in speech: an e-paper refresh runs top-priority
-    // feed tasks on both cores for ~0.1–0.3 s and playback cannot feed I2S (30 ms of DMA), so a refresh
-    // during sound crackles while one in a pause just lengthens it. The state-change redraw at the start
-    // happens during pre-playback buffering, which is silent anyway.
-    if (st.state == AI_SPEAKING) {
-        if (!ai_redraw_slot()) return APP_REDRAW_NONE;
-        s_redraw_granted = true;  // 下一次 tick 通知播放继续 / tell playback to resume on the next tick
-    }
+    // 状态变了立即重绘，文字增长限速。/ Redraw at once on a state change; throttle text growth.
+    if (st.state == s_drawn_state && ctx->now_ms - s_drawn_ms < REDRAW_MIN_MS) return APP_REDRAW_NONE;
+    // 对话中每次刷屏都先向播放要时机：墨水屏刷新时驱动在两个核上跑最高优先级送数任务，播放供不上 I2S
+    // （DMA 只有 30 ms 余量），落在发声处就破音，落在停顿里只是停顿稍长。状态刷新也一样：变成“正在
+    // 回答”的那次刷新与起播前的 1 秒预缓冲同时进行，首次回答字形缓存是冷的，排版加推屏可能超过 1 秒，
+    // 一直刷到开口之后。不出声时播放随即放行（最多 20 ms），并等刷完才开始出声。
+    // During a chat every redraw first asks playback for a slot: an e-paper refresh runs top-priority
+    // feed tasks on both cores and playback cannot feed I2S (30 ms of DMA), so a refresh during sound
+    // crackles while one in a pause just lengthens it. State changes too: the redraw into "speaking"
+    // runs alongside the 1 s pre-playback buffer, and on the first reply the glyph cache is cold, so
+    // layout plus push can run past 1 s, into the sound. While silent, playback grants at once (within
+    // 20 ms) and does not start sounding until the refresh is done.
+    if (!ai_redraw_slot()) return APP_REDRAW_NONE;
+    s_redraw_granted = true;  // 下一次 tick 通知播放继续 / tell playback to resume on the next tick
     return APP_REDRAW_PAGE;
 }
 

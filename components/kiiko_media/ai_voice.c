@@ -132,9 +132,17 @@ static int s_prebuffer_ms = PREBUFFER_MIN_MS;  // 自适应起播缓冲 / adapti
 // the refresh at a pause in speech, with feeding paused, only lengthens that pause, which is inaudible.
 #define QUIET_RMS 300              // 片段结尾低于此电平算停顿 / a chunk tail below this level counts as a pause
 #define QUIET_TAIL 320             // 看结尾 20 ms / check the last 20 ms
-#define REDRAW_HOLD_MAX_MS 800     // 界面没反应时最多等这么久 / longest wait if the page does not respond
+// 界面没来领放行（菜单盖住、已离开本页）时最多等这么久，然后收回。
+// Longest wait for the page to take a grant (a menu covers it, or it was left); then the grant is revoked.
+#define REDRAW_TAKE_MAX_MS 800
+// 界面领了放行就一直等它刷完：首次回答时字形缓存是冷的，排版加推屏可超过 0.8 秒，早先到点就恢复
+// 播放，正好落在推屏中间破音。这个上限只防界面卡死。
+// Once the page has taken the grant, wait until it has drawn: on the first reply the glyph cache is
+// cold and layout plus push can exceed 0.8 s, and resuming at a fixed 0.8 s landed mid-push and
+// crackled. This cap only guards against a stuck page.
+#define REDRAW_DRAW_MAX_MS 3000
 static _Atomic bool s_ui_wants, s_ui_granted, s_ui_busy;
-static unsigned s_ui_pauses, s_ui_pause_ms;
+static unsigned s_ui_pauses, s_ui_pause_ms, s_ui_pause_max_ms, s_ui_overruns;
 // 24k→16k 重采样：带低通的多相 FIR（2/3 倍）。线性插值不滤高频，8–12 kHz 折回可听频段，齿音发破。
 // 24k→16k resampling: a low-passed polyphase FIR (ratio 2/3). Linear interpolation does not filter, so
 // 8–12 kHz folds back into the audible band and sibilants crackle.
@@ -704,20 +712,31 @@ static bool tail_quiet(const int16_t *pcm, size_t n) {
     return frame_rms(pcm + (n - k), (int)k) < QUIET_RMS;
 }
 
-// 有刷屏请求就放行，并等它刷完（最多 REDRAW_HOLD_MAX_MS）。只在不出声的时刻调用。
-// Grant a pending redraw and wait for it to finish (at most REDRAW_HOLD_MAX_MS). Call only while silent.
+// 有刷屏请求就放行，并等它刷完。只在不出声的时刻调用。
+// Grant a pending redraw and wait for it to finish. Call only while silent.
 static void grant_redraw_if_wanted(void) {
     if (!atomic_exchange(&s_ui_wants, false)) return;
     const int64_t t0 = esp_timer_get_time();
     atomic_store(&s_ui_busy, true);
     atomic_store(&s_ui_granted, true);
-    while (atomic_load(&s_ui_busy) && atomic_load(&s_session) &&
-           esp_timer_get_time() - t0 < (int64_t)REDRAW_HOLD_MAX_MS * 1000)
+    while (atomic_load(&s_ui_busy) && atomic_load(&s_session)) {
+        const int64_t waited = esp_timer_get_time() - t0;
+        if (atomic_load(&s_ui_granted)) {
+            // 还没人领：到点收回。与界面的领取都用 exchange，二者只有一个成功。
+            // Not taken yet: revoke when due. Both sides use exchange, so exactly one of them wins.
+            if (waited >= (int64_t)REDRAW_TAKE_MAX_MS * 1000 && atomic_exchange(&s_ui_granted, false)) break;
+        } else if (waited >= (int64_t)REDRAW_DRAW_MAX_MS * 1000) {
+            ++s_ui_overruns;  // 界面领了却迟迟没刷完 / taken but never finished
+            break;
+        }
         vTaskDelay(pdMS_TO_TICKS(10));
+    }
     atomic_store(&s_ui_granted, false);
     atomic_store(&s_ui_busy, false);
+    const unsigned ms = (unsigned)((esp_timer_get_time() - t0) / 1000);
     ++s_ui_pauses;
-    s_ui_pause_ms += (unsigned)((esp_timer_get_time() - t0) / 1000);
+    s_ui_pause_ms += ms;
+    if (ms > s_ui_pause_max_ms) s_ui_pause_max_ms = ms;
 }
 
 static void play_task(void *arg) {
@@ -744,11 +763,11 @@ static void play_task(void *arg) {
                 if (!have && s_st.state == AI_SPEAKING && !atomic_load(&s_responding) && !playing_recently()) {
                     metalio_audio_set_pa(false);
                     ai_log("reply played: %u ms, underruns %u, prebuffer %d ms, i2s underflows %u, "
-                           "redraw pauses %u (%u ms), short writes %u",
+                           "redraw pauses %u (%u ms, longest %u ms, overruns %u), short writes %u",
                            (unsigned)(played * 1000 / AUDIO_RATE), s_underruns, s_prebuffer_ms, (unsigned)underflows,
-                           s_ui_pauses, s_ui_pause_ms, (unsigned)short_writes);
+                           s_ui_pauses, s_ui_pause_ms, s_ui_pause_max_ms, s_ui_overruns, (unsigned)short_writes);
                     underflows = 0;
-                    s_ui_pauses = s_ui_pause_ms = 0;
+                    s_ui_pauses = s_ui_pause_ms = s_ui_pause_max_ms = s_ui_overruns = 0;
                     // 这次断过，下次多攒一点。/ It ran dry this time: buffer more next time.
                     if (s_underruns && s_prebuffer_ms < PREBUFFER_MAX_MS) s_prebuffer_ms += 500;
                     played = short_writes = 0;
@@ -1080,11 +1099,18 @@ void ai_get_status(ai_status_t *out) {
 }
 
 bool ai_redraw_slot(void) {
+    // 没有播放任务就没有要保护的声音。/ Without the playback task there is no sound to protect.
+    if (!atomic_load(&s_session)) return true;
     if (atomic_exchange(&s_ui_granted, false)) return true;  // 播放正停在停顿处等着 / playback is holding at a pause
     atomic_store(&s_ui_wants, true);
     return false;
 }
 
 void ai_redraw_done(void) { atomic_store(&s_ui_busy, false); }
+
+bool ai_audio_busy(void) {
+    return atomic_load(&s_session) &&
+           (atomic_load(&s_responding) || s_st.state == AI_SPEAKING || playing_recently());
+}
 
 bool ai_active(void) { return atomic_load(&s_session) || s_st.state != AI_IDLE; }

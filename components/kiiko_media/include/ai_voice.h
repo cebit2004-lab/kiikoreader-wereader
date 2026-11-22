@@ -58,6 +58,10 @@ bool ai_active(void);
 /// recorded for the next pause. Call ai_redraw_done once the refresh is complete (next tick).
 bool ai_redraw_slot(void);
 void ai_redraw_done(void);
+/// 回答正在生成或播放：此时不走 ai_redraw_slot 的刷屏（如状态栏电量）应推迟。
+/// A reply is being generated or played: refreshes that do not go through ai_redraw_slot (such as the
+/// status-bar battery level) should wait.
+bool ai_audio_busy(void);
 
 #ifdef __cplusplus
 }
