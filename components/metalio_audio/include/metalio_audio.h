@@ -34,6 +34,10 @@ typedef enum {
 /// Start the UART and switch the BH1098G to mode 1 in the background; returns at once.
 esp_err_t metalio_audio_init(void);
 metalio_audio_state_t metalio_audio_state(void);
+/// 提前在后台把 BH1098G 切到模式 1（开机后首次约 2 秒），不等待；已就绪则无动作。
+/// Start switching the BH1098G to mode 1 in the background (about 2 s on first use after boot) without
+/// waiting; does nothing once ready.
+void metalio_audio_prepare(void);
 /// 等到模式 1 就绪或失败。/ Wait until mode 1 is ready or failed.
 bool metalio_audio_wait_ready(int timeout_ms);
 
@@ -53,6 +57,10 @@ int metalio_audio_actual_rate(void);
 // Running count of TX DMA underflows (writes fell behind and silence went out); it also grows while
 // idle, so compare it before and after playback.
 uint32_t metalio_audio_tx_underflows(void);
+/// 第 index 次放空（从 0 数）的时刻，esp_timer 微秒的低 32 位；只保留最近 128 次，更早的返回 false。
+/// When underflow number index (from 0) happened, as the low 32 bits of esp_timer µs; only the latest
+/// 128 are kept and older ones return false.
+bool metalio_audio_tx_underflow_at(uint32_t index, uint32_t *us);
 
 /// 播放单声道 16 位样本，返回写入样本数（<0 出错）。会自动打开功放。
 /// Play mono 16-bit samples; returns samples written (<0 on error). Turns the amplifier on.

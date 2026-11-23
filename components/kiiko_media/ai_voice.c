@@ -61,12 +61,17 @@ static const char *TAG = "ai_voice";
 #define RT_MODEL "qwen3.8-omni-flash-realtime"
 #define RT_VOICE "Katerina"
 #define AUDIO_RATE 16000
-#define REPLY_RATE 24000
+// 请求服务端直接输出 16 kHz（与 BH1098G 时钟一致），省掉重采样，下行也少三分之一。服务端若不认，
+// 回复仍按 24 kHz 来：由 session.updated 里的实际采样率决定走不走重采样。
+// Ask the server for 16 kHz output (the BH1098G clock), skipping resampling and cutting a third of the
+// downlink. If the server ignores it the reply stays 24 kHz: the rate echoed in session.updated decides.
+#define REPLY_RATE_WANTED 16000
+#define REPLY_RATE_DEFAULT 24000
 #define RX_CAP (64 * 1024)
 #define PLAY_RING (384 * 1024)     // 16 kHz 单声道约 12 秒 / ~12 s of 16 kHz mono
 #define MIC_SAMPLES 1600           // 100 ms
 #define UPLOAD_GAIN 4              // BH1098G 麦克风偏小，放大后再上传 / the BH1098G mic is quiet; boost before upload
-#define IDLE_END_MS 20000          // 这么久没人说话就结束 / end after this long without speech
+#define IDLE_END_MS 30000         // 这么久没人说话就结束 / end after this long without speech
 #define PLAY_TAIL_MS 600           // 喇叭停下后麦克风再静音这么久 / keep the mic muted this long after the speaker stops
 // 发送超时库会直接断开连接，WiFi 偶尔卡一下不能撞上这个时限（参考工程同为 8 秒）。
 // The client drops the connection on a send timeout, so a WiFi stall must not reach it (8 s as in the reference).
@@ -153,6 +158,8 @@ static int16_t *s_rs_in;             // RS_TAPS 个历史样点 + 本块 / RS_TA
 static int s_rs_pos;                 // 下一个输出在 s_rs_in 中的位置（半个输入样点为单位）/ next output position, in half input samples
 static int16_t *s_rs_out;
 static _Atomic bool s_ws_connected;  // 握手已完成 / handshake completed
+static int s_reply_rate_req;         // 本次会话向服务端要的输出采样率 / output rate requested this session
+static int s_reply_rate;             // 服务端确认的输出采样率 / output rate the server confirmed
 static wifi_ps_type_t s_prev_ps;
 static bool s_ps_saved;
 
@@ -280,7 +287,8 @@ static void send_session_update(void) {
     cJSON_AddStringToObject(out, "voice", RT_VOICE);
     cJSON *out_fmt = cJSON_AddObjectToObject(out, "format");
     cJSON_AddStringToObject(out_fmt, "type", "pcm");
-    cJSON_AddNumberToObject(out_fmt, "sample_rate", REPLY_RATE);
+    cJSON_AddNumberToObject(out_fmt, "sample_rate", s_reply_rate_req);
+    ai_log("session.update: reply sample_rate %d", s_reply_rate_req);
     send_json(root);
 }
 
@@ -292,7 +300,7 @@ static void clear_playback(void) {
 }
 
 static void resampler_init(void) {
-    const float fc = (float)RS_CUTOFF_HZ / REPLY_RATE;  // 相对输入采样率 / relative to the input rate
+    const float fc = (float)RS_CUTOFF_HZ / REPLY_RATE_DEFAULT;  // 相对输入采样率 / relative to the input rate
     const float half = RS_TAPS / 2;
     for (int phase = 0; phase < 2; ++phase) {
         float h[RS_TAPS], sum = 0;
@@ -349,12 +357,15 @@ static void play_audio_event(char *text) {
         return;
     const int n = (int)(pcm_len / 2);
     if (n <= 0) return;
-    const int m = resample_reply((const int16_t *)text, n, s_rs_out, RX_CAP / 2);
+    // 服务端已按 16 kHz 输出就直接播，否则 24k→16k 重采样。/ Play 16 kHz output as is; otherwise resample 24k→16k.
+    const bool direct = s_reply_rate == AUDIO_RATE;
+    const int16_t *pcm = direct ? (const int16_t *)text : s_rs_out;
+    const int m = direct ? n : resample_reply((const int16_t *)text, n, s_rs_out, RX_CAP / 2);
     const int64_t now = esp_timer_get_time();
     if (!s_reply_first_us) s_reply_first_us = now;
     s_reply_last_us = now;
     s_reply_samples += (size_t)m;
-    const size_t queued = xStreamBufferSend(s_play, s_rs_out, (size_t)m * sizeof(int16_t), pdMS_TO_TICKS(100));
+    const size_t queued = xStreamBufferSend(s_play, pcm, (size_t)m * sizeof(int16_t), pdMS_TO_TICKS(100));
     if (queued < (size_t)m * sizeof(int16_t)) ai_log("playback buffer full: dropped %u bytes", (unsigned)((size_t)m * 2 - queued));
     if (s_st.state != AI_SPEAKING) {
         ai_log("reply audio started (%d samples, volume %d, i2s %d Hz measured %d)", m, metalio_audio_volume(),
@@ -371,6 +382,22 @@ static void handle_event(const char *text) {
         ai_log("session.created");
         post(CMD_CONFIGURE);
     } else if (!strcmp(type, "session.updated")) {
+        // 服务端回显的输出格式决定回复走不走重采样；没回显就按请求的算，并把回显原样记下备查。
+        // The echoed output format decides whether replies are resampled; without an echo, assume the
+        // request, and log what came back for checking.
+        cJSON *session = cJSON_GetObjectItem(root, "session");
+        const cJSON *out = cJSON_GetObjectItem(cJSON_GetObjectItem(session, "audio"), "output");
+        const cJSON *rate = cJSON_GetObjectItem(cJSON_GetObjectItem(out, "format"), "sample_rate");
+        s_reply_rate = cJSON_IsNumber(rate) ? rate->valueint : s_reply_rate_req;
+        cJSON_DeleteItemFromObject(session, "instructions");
+        char *echo = cJSON_PrintUnformatted(session);
+        ai_log("session.updated: reply %d Hz (%s); %.220s", s_reply_rate, cJSON_IsNumber(rate) ? "echoed" : "assumed",
+               echo ? echo : "");
+        cJSON_free(echo);
+        if (s_reply_rate != AUDIO_RATE && s_reply_rate != REPLY_RATE_DEFAULT) {
+            ai_log("unexpected reply rate %d; treating it as %d", s_reply_rate, REPLY_RATE_DEFAULT);
+            s_reply_rate = REPLY_RATE_DEFAULT;
+        }
         atomic_store(&s_streaming, true);
         touch();
         s_retries = 0;
@@ -435,6 +462,15 @@ static void handle_event(const char *text) {
         const char *msg = cJSON_GetStringValue(cJSON_GetObjectItem(err, "message"));
         const char *code = cJSON_GetStringValue(cJSON_GetObjectItem(err, "code"));
         ai_log("server error: code=%s msg=%.200s", code ? code : "", msg ? msg : "");
+        // 还没就绪就报错，多半是不认 16 kHz 输出：改回默认 24 kHz 再配置一次。
+        // An error before the session is ready most likely rejects 16 kHz output: configure again at 24 kHz.
+        if (!atomic_load(&s_streaming) && s_reply_rate_req != REPLY_RATE_DEFAULT) {
+            ai_log("retrying session.update with %d Hz output", REPLY_RATE_DEFAULT);
+            s_reply_rate_req = REPLY_RATE_DEFAULT;
+            post(CMD_CONFIGURE);
+            cJSON_Delete(root);
+            return;
+        }
         atomic_store(&s_responding, false);
         set_error(msg ? msg : "服务返回错误");
         if (s_st.state == AI_THINKING || s_st.state == AI_HEARING) set_state(AI_LISTENING);
@@ -707,6 +743,235 @@ static void mic_task(void *arg) {
     vTaskDeleteWithCaps(NULL);
 }
 
+// ---------------------------------------------------------------- playback diagnostics
+// 每段回答记下 I2S 放空的时刻、送数间隔过长、写入超时、刷屏放行，以及发生放空的那 100 ms 里各任务的
+// CPU 用量，用来找出是谁让播放断供。播放中只往 PSRAM 记，说完后一并写日志，免得日志本身干扰播放。
+// Per reply, record when I2S underflowed, long feed gaps, slow writes and redraw grants, plus every
+// task's CPU use during each 100 ms in which an underflow happened, to find what starves playback.
+// During playback everything goes to PSRAM; it is logged once the reply ends, so logging cannot
+// disturb the sound.
+
+#define DIAG_GAP_US 15000      // 两次写入相隔超过这么久就记 / note feed gaps longer than this
+#define DIAG_SLOW_US 30000     // 写入比音频时长多用这么久就记 / note writes that overrun the audio by this
+#define DIAG_TEXT 4096
+#define DIAG_INCIDENTS 10      // 每段回答最多分析几次放空 / underflow intervals analysed per reply
+#define DIAG_CLUSTER_MS 20     // 相隔这么近的放空算同一次 / underflows this close count as one stall
+#define DIAG_CPU (configUSE_TRACE_FACILITY && configGENERATE_RUN_TIME_STATS)
+
+typedef struct {
+    char *text;
+    size_t len;
+    int64_t t0;                // 本段开始出声 / sound start of this reply
+    uint32_t uf_scan;          // 下一个要归类的放空序号 / next underflow index to classify
+    uint32_t uf_snap;          // 上次快照时的放空计数 / underflow count at the last snapshot
+    int clusters, incidents;
+    uint32_t cl_start_ms, cl_last_ms, cl_count;
+    unsigned uf_lost;
+    bool skip_interval;        // 本区间含刷屏放行，不分析 / this interval held a redraw grant; skip it
+#if DIAG_CPU
+    TaskStatus_t *snap[3];     // 0/1 轮流为每次写入前的快照，2 为开始出声时 / 0/1 alternate before writes, 2 at sound start
+    UBaseType_t count[3];
+    UBaseType_t cap;           // 每份快照容量 / entries per snapshot
+    uint32_t *used;
+    int cur;
+    int64_t snap_us[3];
+#endif
+} diag_t;
+static diag_t s_diag;
+static char s_diag_cl[600];    // 放空分布 / underflow clusters
+static size_t s_diag_cl_len;
+
+static void diag_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void diag_note(const char *fmt, ...) {
+    if (!s_diag.text || s_diag.len + 2 >= DIAG_TEXT) return;
+    int n = snprintf(s_diag.text + s_diag.len, DIAG_TEXT - s_diag.len, "  +%lld ms ",
+                     (long long)((esp_timer_get_time() - s_diag.t0) / 1000));
+    if (n < 0 || s_diag.len + (size_t)n >= DIAG_TEXT - 2) return;
+    va_list args;
+    va_start(args, fmt);
+    const int m = vsnprintf(s_diag.text + s_diag.len + n, DIAG_TEXT - s_diag.len - (size_t)n, fmt, args);
+    va_end(args);
+    if (m < 0) return;
+    size_t len = s_diag.len + (size_t)n + (size_t)m;
+    if (len > DIAG_TEXT - 2) len = DIAG_TEXT - 2;
+    s_diag.text[len++] = '\n';
+    s_diag.text[len] = 0;
+    s_diag.len = len;
+}
+
+static void diag_alloc(void) {
+    const uint32_t caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+    memset(&s_diag, 0, sizeof(s_diag));
+    s_diag.text = heap_caps_malloc(DIAG_TEXT, caps);
+#if DIAG_CPU
+    // 数组小于任务数时快照直接返回 0，所以按当前任务数再留余量。/ A snapshot returns nothing if the array is smaller than the task count, so leave headroom.
+    s_diag.cap = uxTaskGetNumberOfTasks() + 24;
+    for (int i = 0; i < 3; ++i) s_diag.snap[i] = heap_caps_malloc(s_diag.cap * sizeof(TaskStatus_t), caps);
+    s_diag.used = heap_caps_malloc(s_diag.cap * sizeof(uint32_t), caps);
+#endif
+}
+
+static void diag_free(void) {
+    heap_caps_free(s_diag.text);
+#if DIAG_CPU
+    for (int i = 0; i < 3; ++i) heap_caps_free(s_diag.snap[i]);
+    heap_caps_free(s_diag.used);
+#endif
+    memset(&s_diag, 0, sizeof(s_diag));
+}
+
+#if DIAG_CPU
+static void diag_snapshot(int slot) {
+    s_diag.count[slot] = s_diag.snap[slot] ? uxTaskGetSystemState(s_diag.snap[slot], s_diag.cap, NULL) : 0;
+    s_diag.snap_us[slot] = esp_timer_get_time();
+}
+
+// 从快照 a 到 b 按 CPU 用量排名第 skip 起的 top 个任务，写成“名字/优先级/核 毫秒”。
+// Tasks ranked skip onwards (top of them) by CPU time from snapshot a to b, as "name/priority/core ms".
+static void diag_cpu_top(int a, int b, int skip, int top, char *out, size_t cap) {
+    size_t len = 0;
+    out[0] = 0;
+    uint32_t *used = s_diag.used;
+    if (!used || !s_diag.count[a] || !s_diag.count[b]) {
+        snprintf(out, cap, "(no snapshot)");
+        return;
+    }
+    for (UBaseType_t i = 0; i < s_diag.count[b]; ++i) {
+        const TaskStatus_t *t = &s_diag.snap[b][i];
+        used[i] = 0;
+        for (UBaseType_t j = 0; j < s_diag.count[a]; ++j)
+            if (s_diag.snap[a][j].xTaskNumber == t->xTaskNumber) {
+                used[i] = (uint32_t)(t->ulRunTimeCounter - s_diag.snap[a][j].ulRunTimeCounter);
+                break;
+            }
+    }
+    for (int k = 0; k < skip + top; ++k) {
+        int best = -1;
+        for (UBaseType_t i = 0; i < s_diag.count[b]; ++i)
+            if (used[i] && (best < 0 || used[i] > used[best])) best = (int)i;
+        if (best < 0) break;
+        const TaskStatus_t *t = &s_diag.snap[b][best];
+        if (k < skip) {
+            used[best] = 0;
+            continue;
+        }
+#if configTASKLIST_INCLUDE_COREID
+        const int core = t->xCoreID == tskNO_AFFINITY ? -1 : (int)t->xCoreID;
+#else
+        const int core = -2;
+#endif
+        const int n = snprintf(out + len, cap - len, "%s%.12s/p%u/c%d %u.%ums", len ? ", " : "", t->pcTaskName,
+                               (unsigned)t->uxCurrentPriority, core, (unsigned)(used[best] / 1000),
+                               (unsigned)(used[best] % 1000 / 100));
+        if (n < 0 || (size_t)n >= cap - len) break;
+        len += (size_t)n;
+        used[best] = 0;
+    }
+}
+#endif
+
+static void diag_cluster_close(void) {
+    if (!s_diag.cl_count) return;
+    if (s_diag_cl_len + 24 < sizeof(s_diag_cl))
+        s_diag_cl_len += (size_t)snprintf(s_diag_cl + s_diag_cl_len, sizeof(s_diag_cl) - s_diag_cl_len, " +%u×%u",
+                                          (unsigned)s_diag.cl_start_ms, (unsigned)s_diag.cl_count);
+    ++s_diag.clusters;
+    s_diag.cl_count = 0;
+}
+
+// 把新发生的放空按时间归成一簇簇（播放中调用）。/ Group new underflows into clusters by time (during playback).
+static void diag_scan_underflows(void) {
+    const uint32_t now = metalio_audio_tx_underflows();
+    for (uint32_t i = s_diag.uf_scan; i != now; ++i) {
+        uint32_t us;
+        if (!metalio_audio_tx_underflow_at(i, &us)) { ++s_diag.uf_lost; continue; }
+        const uint32_t ms = (uint32_t)(us - (uint32_t)s_diag.t0) / 1000;
+        if (s_diag.cl_count && ms - s_diag.cl_last_ms <= DIAG_CLUSTER_MS) {
+            ++s_diag.cl_count;
+        } else {
+            diag_cluster_close();
+            s_diag.cl_start_ms = ms;
+            s_diag.cl_count = 1;
+        }
+        s_diag.cl_last_ms = ms;
+    }
+    s_diag.uf_scan = now;
+}
+
+// 跳过一段不算破音的放空（刷屏放行、断后重攒）。/ Skip underflows that are not crackles (redraw grants, rebuffering).
+static void diag_rebase(void) {
+    s_diag.uf_scan = s_diag.uf_snap = metalio_audio_tx_underflows();
+    s_diag.skip_interval = true;
+}
+
+// 开始出声。/ Sound starts.
+static void diag_begin(void) {
+    s_diag.len = 0;
+    if (s_diag.text) s_diag.text[0] = 0;
+    s_diag_cl_len = 0;
+    s_diag_cl[0] = 0;
+    s_diag.t0 = esp_timer_get_time();
+    s_diag.clusters = s_diag.incidents = 0;
+    s_diag.cl_count = 0;
+    s_diag.uf_lost = 0;
+    s_diag.uf_scan = s_diag.uf_snap = metalio_audio_tx_underflows();
+    s_diag.skip_interval = false;
+#if DIAG_CPU
+    diag_snapshot(2);
+    s_diag.cur = 0;
+    diag_snapshot(0);
+#endif
+}
+
+// 每次写入前：区间里有放空就分析这段时间谁在占 CPU。/ Before each write: if this interval underflowed, see who held the CPU.
+static void diag_before_write(void) {
+    diag_scan_underflows();
+#if DIAG_CPU
+    const int prev = s_diag.cur, next = prev ^ 1;
+    diag_snapshot(next);
+    s_diag.cur = next;
+    const uint32_t now = metalio_audio_tx_underflows();
+    if (now != s_diag.uf_snap && !s_diag.skip_interval && s_diag.incidents < DIAG_INCIDENTS) {
+        ++s_diag.incidents;
+        static char top[200];  // 播放任务栈小，不放栈上 / kept off the small playback stack
+        diag_cpu_top(prev, next, 0, 5, top, sizeof(top));
+        diag_note("underflow x%u in last %u ms; cpu: %s", (unsigned)(now - s_diag.uf_snap),
+                  (unsigned)((s_diag.snap_us[next] - s_diag.snap_us[prev]) / 1000), top);
+    }
+    s_diag.uf_snap = now;
+#endif
+    s_diag.skip_interval = false;
+}
+
+// 说完：把记下的都写进日志。/ Reply finished: log everything recorded.
+static void diag_end(void) {
+    diag_cluster_close();
+    const unsigned dur = (unsigned)((esp_timer_get_time() - s_diag.t0) / 1000);
+    ai_log("diag: %u ms of sound, %d stalls (start ms × underflows):%s%s", dur, s_diag.clusters,
+           s_diag_cl_len ? s_diag_cl : " none", s_diag.uf_lost ? " (some times lost)" : "");
+#if DIAG_CPU
+    const int end = s_diag.cur ^ 1;
+    diag_snapshot(end);
+    static char top[260];  // 播放任务栈小，不放栈上 / kept off the small playback stack
+    diag_cpu_top(2, end, 0, 5, top, sizeof(top));
+    ai_log("diag: cpu over %u ms: %s", (unsigned)((s_diag.snap_us[end] - s_diag.snap_us[2]) / 1000), top);
+    diag_cpu_top(2, end, 5, 5, top, sizeof(top));
+    if (top[0]) ai_log("diag: cpu (cont.): %s", top);
+#endif
+    ai_log("diag: playback stack headroom %u bytes", (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    if (!s_diag.text) return;
+    char *line = s_diag.text;
+    while (*line) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        ai_log("diag:%s", line);
+        if (!nl) break;
+        line = nl + 1;
+    }
+    s_diag.len = 0;
+    s_diag.text[0] = 0;
+}
+
 static bool tail_quiet(const int16_t *pcm, size_t n) {
     const size_t k = n < QUIET_TAIL ? n : QUIET_TAIL;
     return frame_rms(pcm + (n - k), (int)k) < QUIET_RMS;
@@ -734,6 +999,7 @@ static void grant_redraw_if_wanted(void) {
     atomic_store(&s_ui_granted, false);
     atomic_store(&s_ui_busy, false);
     const unsigned ms = (unsigned)((esp_timer_get_time() - t0) / 1000);
+    if (s_diag.t0) diag_note("redraw pause %u ms", ms);
     ++s_ui_pauses;
     s_ui_pause_ms += ms;
     if (ms > s_ui_pause_max_ms) s_ui_pause_max_ms = ms;
@@ -747,6 +1013,7 @@ static void play_task(void *arg) {
     // I2S 放空次数只算正在播的区间（每次停下时末尾会多记两三次）。
     // I2S underflows count only while playing (each stop adds two or three at the tail).
     uint32_t underflow_mark = 0, underflows = 0;
+    int64_t feed_end_us = 0;  // 上次写完的时刻 / when the last write finished
     while (buf && atomic_load(&s_session)) {
         if (!primed) {
             // 服务端边生成边发，速度约等于实时（实测 0.9 倍）：先攒够再播，断了就重新攒，
@@ -759,8 +1026,17 @@ static void play_task(void *arg) {
             if (have > 0 && (have >= need || !atomic_load(&s_responding))) {
                 primed = true;
                 underflow_mark = metalio_audio_tx_underflows();
+                if (!played) diag_begin();
+                else {
+                    diag_note("resume after rebuffer (%u bytes buffered)", (unsigned)have);
+                    diag_rebase();
+                }
+                feed_end_us = 0;
             } else {
-                if (!have && s_st.state == AI_SPEAKING && !atomic_load(&s_responding) && !playing_recently()) {
+                // 回答说完（或被打断后已播过）：收尾并写诊断。/ Reply finished (or played, then interrupted): wrap up and log diagnostics.
+                if (!have && !atomic_load(&s_responding) && !playing_recently() && (s_st.state == AI_SPEAKING || played)) {
+                    if (played) diag_end();
+                    s_diag.t0 = 0;
                     metalio_audio_set_pa(false);
                     ai_log("reply played: %u ms, underruns %u, prebuffer %d ms, i2s underflows %u, "
                            "redraw pauses %u (%u ms, longest %u ms, overruns %u), short writes %u",
@@ -773,7 +1049,7 @@ static void play_task(void *arg) {
                     played = short_writes = 0;
                     s_underruns = 0;
                     atomic_store(&s_ui_wants, false);  // 说完了，界面按状态变化自己重绘 / done: the page redraws on the state change
-                    set_state(AI_LISTENING);
+                    if (s_st.state == AI_SPEAKING) set_state(AI_LISTENING);
                 }
                 // 还没出声（起播前缓冲或断后重攒）：随时可以刷屏。/ Not sounding yet (pre-buffering or rebuffering): redraws are free.
                 grant_redraw_if_wanted();
@@ -783,7 +1059,17 @@ static void play_task(void *arg) {
         }
         const size_t got = xStreamBufferReceive(s_play, buf, MIC_SAMPLES * sizeof(int16_t), pdMS_TO_TICKS(20));
         if (got) {
+            diag_before_write();
+            const int64_t w0 = esp_timer_get_time();
+            if (feed_end_us && w0 - feed_end_us > DIAG_GAP_US)
+                diag_note("feed gap %u ms (%u bytes waiting)", (unsigned)((w0 - feed_end_us) / 1000),
+                          (unsigned)xStreamBufferBytesAvailable(s_play));
             const int wrote = metalio_audio_write(buf, got / sizeof(int16_t), pdMS_TO_TICKS(500));
+            feed_end_us = esp_timer_get_time();
+            const int64_t audio_us = (int64_t)(got / sizeof(int16_t)) * 1000000 / AUDIO_RATE;
+            if (feed_end_us - w0 > audio_us + DIAG_SLOW_US)
+                diag_note("slow write %u ms for %u ms of audio", (unsigned)((feed_end_us - w0) / 1000),
+                          (unsigned)(audio_us / 1000));
             played += wrote > 0 ? (size_t)wrote : 0;
             if (wrote < (int)(got / sizeof(int16_t))) ++short_writes;
             atomic_store(&s_last_play_us, esp_timer_get_time());
@@ -792,13 +1078,20 @@ static void play_task(void *arg) {
             // This chunk ends in silence, i.e. a pause in speech: grant a redraw here, so only the pause runs
             // dry. Underflows during that pause are not crackles, so they are left out of the count.
             if (atomic_load(&s_ui_wants) && tail_quiet(buf, got / sizeof(int16_t))) {
+                diag_scan_underflows();
                 const uint32_t before = metalio_audio_tx_underflows();
                 grant_redraw_if_wanted();
                 underflow_mark += metalio_audio_tx_underflows() - before;
+                diag_rebase();
+                feed_end_us = 0;
             }
         } else {
             // 回答还在来、缓冲却空了：记一次断续并重新攒。/ Reply still coming but the buffer ran dry: count it and rebuffer.
-            if (played && atomic_load(&s_responding)) ++s_underruns;
+            diag_scan_underflows();
+            if (played && atomic_load(&s_responding)) {
+                ++s_underruns;
+                diag_note("buffer ran dry: rebuffering");
+            }
             underflows += metalio_audio_tx_underflows() - underflow_mark;
             primed = false;
         }
@@ -884,6 +1177,7 @@ static void session_end(const char *err) {
         s_rs_out = NULL;
         heap_caps_free(s_rs_in);
         s_rs_in = NULL;
+        diag_free();
     }
     atomic_store(&s_responding, false);
     atomic_store(&s_ui_wants, false);
@@ -940,6 +1234,8 @@ static void session_start(void) {
     s_retry_at_us = 0;
     s_auth_failed = false;
     s_up_dropped = 0;
+    s_reply_rate_req = REPLY_RATE_WANTED;
+    s_reply_rate = REPLY_RATE_DEFAULT;
     lock();
     s_st.state = AI_CONNECTING;
     s_st.user[0] = s_st.reply[0] = s_st.error[0] = 0;
@@ -953,17 +1249,25 @@ static void session_start(void) {
     // 音乐与 AI 不同时用音频和网络。/ Music and AI never share audio and network.
     if (music_active()) music_stop();
     char err[64] = {0};
-    if (!media_net_acquire(err, sizeof(err), &s_cancel)) { session_end(s_cancel ? NULL : err); return; }
-    // WiFi 刚连上、还没开始传数据时开 I2S（麦克风+喇叭）；分不到就先断网占 I2S 再重连。
-    // Open I2S (mic + speaker) right after WiFi connects, before traffic fragments DMA RAM; failing
-    // that, drop WiFi, claim I2S and reconnect.
+    const int64_t t_start = esp_timer_get_time();
+    // 先开 I2S（麦克风+喇叭）再连 WiFi：I2S DMA 只能用内部 RAM，实测 WiFi 连上后最大空块只剩约 5.8 KB，
+    // 先连网时 I2S 一次也没分到过，每次都得断网、开 I2S、再连一遍，白等约 5 秒。WiFi 已被别的功能连着
+    // 而分不到时，才断网再开。
+    // Open I2S (mic + speaker) before WiFi: I2S DMA must be internal RAM, and once WiFi is up the largest
+    // free block measured only ~5.8 KB. Connecting first never once left room for I2S, so every chat
+    // dropped WiFi, opened I2S and connected again, wasting ~5 s. Only when WiFi is already up for
+    // something else and I2S does not fit is WiFi dropped first.
     if (metalio_audio_open(AUDIO_RATE, true) != ESP_OK) {
+        ai_log("i2s did not fit; dropping wifi first");
         media_net_drop();
         if (metalio_audio_open(AUDIO_RATE, true) != ESP_OK) { session_end("音频设备不可用"); return; }
-        if (!media_net_acquire(err, sizeof(err), &s_cancel)) { session_end(s_cancel ? NULL : err); return; }
     }
+    const int64_t t_i2s = esp_timer_get_time();
     if (s_cancel) { session_end(NULL); return; }
-    ai_log("wifi + i2s ready: i2s %d Hz measured %d", metalio_audio_sample_rate(), metalio_audio_actual_rate());
+    if (!media_net_acquire(err, sizeof(err), &s_cancel)) { session_end(s_cancel ? NULL : err); return; }
+    if (s_cancel) { session_end(NULL); return; }
+    ai_log("wifi + i2s ready: i2s %d Hz measured %d; audio %d ms, wifi %d ms", metalio_audio_sample_rate(),
+           metalio_audio_actual_rate(), (int)((t_i2s - t_start) / 1000), (int)((esp_timer_get_time() - t_i2s) / 1000));
     log_mem("wifi + i2s");
     // 实时语音要求上下行都及时：对话期间关闭 WiFi 省电（参考工程与在线升级同样处理），结束时恢复。
     // Realtime voice needs prompt uplink and downlink: WiFi power saving is off for the chat (as in the
@@ -979,6 +1283,7 @@ static void session_start(void) {
     s_frames = heap_caps_malloc(UP_FRAMES * sizeof(up_frame_t), caps);
     s_up_free = xQueueCreateWithCaps(UP_FRAMES, sizeof(up_frame_t *), caps);
     s_up_ready = xQueueCreateWithCaps(UP_FRAMES, sizeof(up_frame_t *), caps);
+    diag_alloc();  // 失败只是没有诊断 / failure only loses the diagnostics
     if (!s_rx || !s_rs_out || !s_rs_in || !s_play || !s_frames || !s_up_free || !s_up_ready) { session_end("内存不足"); return; }
     for (int i = 0; i < UP_FRAMES; ++i) {
         up_frame_t *f = &s_frames[i];
@@ -993,7 +1298,9 @@ static void session_start(void) {
     atomic_store(&s_workers, 3);
     if (xTaskCreatePinnedToCoreWithCaps(mic_task, "ai_mic", 6 * 1024, NULL, 6, NULL, 1, caps) != pdPASS) atomic_fetch_sub(&s_workers, 1);
     if (xTaskCreatePinnedToCoreWithCaps(upload_task, "ai_up", 6 * 1024, NULL, 5, NULL, 1, caps) != pdPASS) atomic_fetch_sub(&s_workers, 1);
-    if (xTaskCreatePinnedToCoreWithCaps(play_task, "ai_play", 6 * 1024, NULL, 6, NULL, 1, caps) != pdPASS) atomic_fetch_sub(&s_workers, 1);
+    // 播放任务要在说完时格式化诊断日志（printf 栈深），给足 10 KB（PSRAM）。
+    // The playback task formats diagnostics when a reply ends (printf is stack-hungry): 10 KB, in PSRAM.
+    if (xTaskCreatePinnedToCoreWithCaps(play_task, "ai_play", 10 * 1024, NULL, 6, NULL, 1, caps) != pdPASS) atomic_fetch_sub(&s_workers, 1);
     if (atomic_load(&s_workers) != 3) { session_end("内存不足"); return; }
     if (!ws_open()) ws_lost();
 }

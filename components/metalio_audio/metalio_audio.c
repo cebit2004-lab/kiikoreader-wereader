@@ -54,6 +54,10 @@ static _Atomic int s_volume = 70;
 static _Atomic bool s_pa_on;
 static int32_t *s_txbuf, *s_rxbuf;      // CHUNK_FRAMES*2 槽 / slots each（发送按 int16 用 / TX used as int16）
 static volatile uint32_t s_tx_underflows;  // 只由中断递增 / incremented by the ISR only
+// 最近几次放空的时刻（esp_timer 微秒的低 32 位），放在 PSRAM，查破音落在哪一刻。
+// Times of the latest underflows (low 32 bits of esp_timer µs), in PSRAM, to place each crackle in time.
+#define UF_RING 128
+static volatile uint32_t *s_uf_us;
 static bool s_capture;                  // 当前是否开了麦克风通道 / microphone channel open
 static bool s_tx32;                     // 发送用 32 位数据（与麦克风同开时）/ TX uses 32-bit data (when the mic is open)
 
@@ -129,7 +133,10 @@ static void mode_task(void *arg) {
     char ver[64] = {0};
     if (ok) (void)metalio_audio_at("AT+GVER=1", "AT+GVER=", 1000, ver, sizeof(ver));
     ESP_LOGI(TAG, "BH1098G %s %s", ok ? "ready" : "unavailable", ver);
-    if (!ok) uart_down();
+    // 切完模式就不再需要串口：卸掉驱动，提前准备而没用上时也不常驻内部 RAM。
+    // The UART is not needed once the mode is set: remove the driver, so an unused early start leaves
+    // nothing resident in internal RAM.
+    uart_down();
     s_state = ok ? METALIO_AUDIO_READY : METALIO_AUDIO_FAILED;
     vTaskDeleteWithCaps(NULL);
 }
@@ -203,6 +210,11 @@ static void start_mode(void) {
 
 metalio_audio_state_t metalio_audio_state(void) { return s_state; }
 
+void metalio_audio_prepare(void) {
+    if (s_state == METALIO_AUDIO_FAILED) s_state = METALIO_AUDIO_OFF;
+    start_mode();
+}
+
 bool metalio_audio_wait_ready(int timeout_ms) {
     if (s_state == METALIO_AUDIO_OFF || s_state == METALIO_AUDIO_FAILED) {
         if (s_state == METALIO_AUDIO_FAILED) s_state = METALIO_AUDIO_OFF;
@@ -245,11 +257,20 @@ static IRAM_ATTR bool on_tx_underflow(i2s_chan_handle_t handle, i2s_event_data_t
     (void)handle;
     (void)event;
     (void)ctx;
-    ++s_tx_underflows;
+    const uint32_t n = s_tx_underflows;
+    if (s_uf_us) s_uf_us[n % UF_RING] = (uint32_t)esp_timer_get_time();
+    s_tx_underflows = n + 1;
     return false;
 }
 
 uint32_t metalio_audio_tx_underflows(void) { return s_tx_underflows; }
+
+bool metalio_audio_tx_underflow_at(uint32_t index, uint32_t *us) {
+    const uint32_t n = s_tx_underflows;
+    if (!s_uf_us || !us || index >= n || n - index > UF_RING) return false;
+    *us = s_uf_us[index % UF_RING];
+    return n - index <= UF_RING;  // 读的同时没被覆盖 / not overwritten while reading
+}
 
 static void close_locked(void) {
     if (s_tx) { (void)i2s_channel_disable(s_tx); (void)i2s_del_channel(s_tx); s_tx = NULL; }
@@ -322,6 +343,8 @@ esp_err_t metalio_audio_open(int sample_rate, bool capture) {
         std_config(&std, sample_rate, I2S_DATA_BIT_WIDTH_32BIT);
         err = i2s_channel_init_std_mode(s_rx, &std);
     }
+    if (err == ESP_OK && !s_uf_us)
+        s_uf_us = heap_caps_calloc(UF_RING, sizeof(uint32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);  // 失败只是不记时刻 / failure only loses the times
     if (err == ESP_OK) {
         const i2s_event_callbacks_t cbs = {.on_send_q_ovf = on_tx_underflow};
         err = i2s_channel_register_event_callback(s_tx, &cbs, NULL);

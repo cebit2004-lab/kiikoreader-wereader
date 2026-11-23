@@ -209,7 +209,14 @@ static app_redraw_t on_tick(app_ctx_t *ctx) {
     return APP_REDRAW_PAGE;
 }
 
-static void on_enter(app_ctx_t *ctx) { (void)ctx; s_drawn_rev = 0; }
+// 进页就在后台准备音频芯片：开机后第一次切模式要 2 秒多，点开始时多半已经备好。
+// Prepare the audio chip in the background on entry: the first mode switch after boot takes over 2 s,
+// and is usually done by the time start is tapped.
+static void on_enter(app_ctx_t *ctx) {
+    (void)ctx;
+    s_drawn_rev = 0;
+    metalio_audio_prepare();
+}
 
 // 离开页面就结束对话，不在后台占着网络和麦克风。/ Leaving the page ends the chat; nothing lingers on the network or mic.
 static void ai_exit(app_ctx_t *ctx) {

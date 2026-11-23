@@ -150,3 +150,11 @@ CONFIG_ESP_WIFI_SLP_IRAM_OPT=y
 # Ring-buffer ISR functions in flash save 3.4 KB of internal RAM (the on-board audio UART driver pulls
 # them in; the UART ISR is not in IRAM, so this is safe).
 CONFIG_RINGBUF_PLACE_ISR_FUNCTIONS_INTO_FLASH=y
+
+# AI 语音诊断：任务运行时统计，用来查播放断供时是谁占着 CPU（每个任务多十几字节）。
+# AI voice diagnostics: per-task run-time stats, to see who holds the CPU when playback starves
+# (about a dozen bytes per task).
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y
+CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
