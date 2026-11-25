@@ -38,6 +38,9 @@
  */
 #if KIIKO_BOARD_METALIO47
 #ifdef ESP_PLATFORM
+#if __has_include("sdkconfig.h")  // 桌面模拟器没有它 / the desktop simulator has none
+#include "sdkconfig.h"            // CONFIG_BT_ENABLED
+#endif
 #include "ui_locale_format.h"
 #endif
 #include "setup_state.h"
@@ -1766,7 +1769,11 @@ static void render_content(app_ctx_t *ctx, uint8_t *fb) {
     }
     char wifi[56];snprintf(wifi,sizeof(wifi),"%s",s_main_wifi_saved?s_main_wifi:"未配置");
     const char *connection_labels[]={"WiFi","蓝牙翻页器","日期与时间"};
+#if CONFIG_BT_ENABLED
     const char *connection_values[]={wifi,app_settings_ble_turner()?"已开启":"已关闭","设置"};
+#else
+    const char *connection_values[]={wifi,"本固件未包含","设置"};
+#endif
     const int connection_icons[]={0,1,6};
     setting_group(fb,SETTINGS_WIRELESS_Y-49,"连接与时间",SETTINGS_WIRELESS_Y,
                   connection_icons,connection_labels,connection_values,SETTINGS_WIRELESS_ROWS);
@@ -3215,6 +3222,9 @@ static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
             extern const app_desc_t app_transfer;app_transfer_request_wifi_setup();ctx->request_app=&app_transfer;return APP_REDRAW_NONE;
         }
         if(row==1) {
+#if !CONFIG_BT_ENABLED
+            return APP_REDRAW_NONE;  // 本固件没有蓝牙，这一行只作说明 / no Bluetooth here; the row is informational
+#endif
             s_page=SETTINGS_BLUETOOTH;s_ble_scroll=s_ble_learning=0;s_ble_notice[0]=s_ble_feedback[0]=0;
             ble_pt_raw_t unused;while(ble_pt_pop_raw(&unused)){}return APP_REDRAW_PAGE;
         }

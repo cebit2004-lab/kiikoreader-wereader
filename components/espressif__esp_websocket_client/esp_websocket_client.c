@@ -24,6 +24,7 @@
 #include "esp_system.h"
 #include <errno.h>
 #include <arpa/inet.h>
+#include <sys/socket.h>
 
 static const char *TAG = "websocket_client";
 
@@ -1581,6 +1582,20 @@ esp_err_t esp_websocket_client_close_with_code(esp_websocket_client_handle_t cli
 esp_err_t esp_websocket_client_close(esp_websocket_client_handle_t client, TickType_t timeout)
 {
     return esp_websocket_client_close_with_optional_body(client, false, 0, NULL, 0, timeout);
+}
+
+// kiikoreader：见头文件。不取 client->lock：接收任务卡住时正占着它。
+// kiikoreader: see the header. client->lock is not taken: a stuck receive task is holding it.
+esp_err_t esp_websocket_client_abort_socket(esp_websocket_client_handle_t client)
+{
+    if (client == NULL || client->transport == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const int fd = esp_transport_get_socket(client->transport);
+    if (fd < 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return shutdown(fd, SHUT_RDWR) == 0 ? ESP_OK : ESP_FAIL;
 }
 
 int esp_websocket_client_send_text(esp_websocket_client_handle_t client, const char *data, int len, TickType_t timeout)

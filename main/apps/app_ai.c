@@ -209,22 +209,26 @@ static app_redraw_t on_tick(app_ctx_t *ctx) {
     return APP_REDRAW_PAGE;
 }
 
-// 进页就在后台准备音频芯片：开机后第一次切模式要 2 秒多，点开始时多半已经备好。
-// Prepare the audio chip in the background on entry: the first mode switch after boot takes over 2 s,
-// and is usually done by the time start is tapped.
+// 进页就在后台准备：音频芯片切模式（开机后第一次要 2 秒多），再开音频、连 WiFi（见 ai_page_open），
+// 点开始时网络多半已经就绪。
+// Prepare in the background on entry: the audio chip's mode switch (over 2 s the first time after
+// boot), then audio and WiFi (see ai_page_open), so the network is usually ready when start is tapped.
 static void on_enter(app_ctx_t *ctx) {
     (void)ctx;
     s_drawn_rev = 0;
     metalio_audio_prepare();
+    ai_page_open(true);
 }
 
-// 离开页面就结束对话，不在后台占着网络和麦克风。/ Leaving the page ends the chat; nothing lingers on the network or mic.
+// 离开页面就结束对话并收回预热，不在后台占着网络和麦克风。
+// Leaving the page ends the chat and the warm-up; nothing lingers on the network or mic.
 static void ai_exit(app_ctx_t *ctx) {
     (void)ctx;
     if (s_redraw_granted) {  // 别让播放白等 / do not leave playback waiting
         s_redraw_granted = false;
         ai_redraw_done();
     }
+    ai_page_open(false);  // 先标记离页，结束对话时就不再保留 / mark the page closed first so ending the chat keeps nothing
     ai_stop();
 }
 

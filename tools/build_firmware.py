@@ -282,7 +282,14 @@ def build_one(board, args):
                   'CONFIG_MBEDTLS_HARDWARE_AES':'n','CONFIG_MBEDTLS_HARDWARE_SHA':'n',
                   # AI 语音诊断的任务运行时统计（见 sdkconfig.defaults）。/ Run-time stats for AI voice diagnostics (see sdkconfig.defaults).
                   'CONFIG_FREERTOS_USE_TRACE_FACILITY':'y','CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS':'y',
-                  'CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID':'y','CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS':'y'}
+                  'CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID':'y','CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS':'y',
+                  # 联网诊断的 lwIP 收发计数（见 sdkconfig.defaults）。/ lwIP counters for network diagnostics (see sdkconfig.defaults).
+                  'CONFIG_LWIP_STATS':'y',
+                  # 每次开 WiFi 做完整射频校准（见 sdkconfig.defaults）。/ Full RF calibration on every WiFi start (see sdkconfig.defaults).
+                  'CONFIG_ESP_PHY_RF_CAL_FULL':'y','CONFIG_ESP_PHY_RF_CAL_PARTIAL':'n','CONFIG_ESP_PHY_CALIBRATION_MODE':'2',
+                  # 本固件不编入蓝牙（见 sdkconfig.defaults），旧缓存里的 BT=y 一并改掉。
+                  # Bluetooth is not built in (see sdkconfig.defaults); rewrite BT=y left in old caches.
+                  'CONFIG_BT_ENABLED':'n'}
         lines=[line for line in lines if not any(line.startswith(key+'=') or line=='# '+key+' is not set' for key in transfer)]
         path.write_text('\n'.join(lines+[key+'=y' for key in required]+
                                   [key+'='+value for key,value in transfer.items()])+'\n')

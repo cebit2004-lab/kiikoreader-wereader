@@ -18,6 +18,9 @@
  */
 
 #ifdef ESP_PLATFORM
+#if __has_include("sdkconfig.h")  // 桌面模拟器没有它 / the desktop simulator has none
+#include "sdkconfig.h"            // CONFIG_BT_ENABLED
+#endif
 #include "ui_locale_format.h"
 #endif
 #include "settings.h"
@@ -864,7 +867,13 @@ esp_err_t app_settings_set_ai_short(app_ai_action_t action){
     nvs_close(h);if(err==ESP_OK)s_ai_short=action;return err;
 }
 #endif
+// 没编入蓝牙时一律当作关闭，NVS 里旧的「开启」也不算。/ Without Bluetooth built in it always reads off,
+// whatever an old "on" in NVS says.
+#if CONFIG_BT_ENABLED
 bool app_settings_ble_turner(void) { return s_ble_turner; }
+#else
+bool app_settings_ble_turner(void) { return false; }
+#endif
 app_reader_key_action_t app_settings_reader_key_action(unsigned key) {
     return key < 3 ? (app_reader_key_action_t)s_reader_keys[key] : APP_READER_KEY_NONE;
 }
@@ -926,6 +935,10 @@ void app_settings_set_reader_hold_refresh(bool on) {
     nvs_put_u8(NVS_KEY_HOLD_REFRESH, on ? 1 : 0);
 }
 void app_settings_set_ble_turner(bool on) {
+#if !CONFIG_BT_ENABLED
+    (void)on;
+    return;  // 本固件没有蓝牙，开关无效 / no Bluetooth in this firmware; the switch does nothing
+#endif
     if (s_ble_turner == on) return;
     s_ble_turner = on;
     nvs_put_u8(NVS_KEY_BLE_TURNER, on ? 1 : 0);

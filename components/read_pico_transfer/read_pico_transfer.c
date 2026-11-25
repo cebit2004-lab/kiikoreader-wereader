@@ -723,6 +723,66 @@ static void release_config(void) {
     portENTER_CRITICAL(&s_lock); s_config_busy = false; portEXIT_CRITICAL(&s_lock);
 }
 
+/*
+ * 记住信道：连上后把路由器的信道存进 NVS（和凭据同一个命名空间，恢复出厂设置一并清掉），下次从这个
+ * 信道开始快速扫描，找到就连，省掉全信道扫描的约 2.5 秒。快速扫描在这个信道上找不到时还会接着扫其他
+ * 信道；万一这次没连上，后面的重试改回全信道扫描、按信号挑路由器。
+ * Channel hint: once connected, store the router's channel in NVS (the credentials namespace, so a
+ * factory reset clears it too). Next time the fast scan starts on that channel and connects on the
+ * first match, skipping the ~2.5 s full scan. A fast scan that misses on that channel still moves on
+ * to the others; if this attempt fails anyway, later retries go back to a full scan that picks the
+ * router by signal.
+ */
+typedef struct {
+    uint8_t version;  ///< 格式版本 1 / format version 1
+    uint8_t channel;  ///< 1–14
+    char ssid[33];    ///< 属于哪个网络 / the network it belongs to
+} transfer_channel_hint_t;
+static uint8_t s_hint_channel;     ///< 本次用的提示信道，0 为全信道扫描 / hint in use, 0 for a full scan
+static bool s_hint_drop;           ///< 提示信道没连上，下次改全信道 / the hint failed; rescan everything next
+static bool s_hint_checked;        ///< 本次联网已核对过信道 / channel already checked this session
+static int64_t s_wifi_begin_ms;    ///< 开始联网的时刻 / when bring-up began
+static int64_t s_wifi_started_ms;  ///< esp_wifi_start 返回的时刻 / when esp_wifi_start returned
+
+static uint8_t channel_hint_load(const char *ssid) {
+    nvs_handle_t h;
+    transfer_channel_hint_t hint = {0};
+    size_t size = sizeof(hint);
+    if (!ssid || !ssid[0] || credentials_open(NVS_READONLY, &h) != ESP_OK) return 0;
+    esp_err_t err = nvs_get_blob(h, "chan_hint", &hint, &size);
+    nvs_close(h);
+    if (err != ESP_OK || size != sizeof(hint) || hint.version != 1 || hint.channel < 1 || hint.channel > 14) return 0;
+    hint.ssid[32] = 0;
+    return strcmp(hint.ssid, ssid) ? 0 : hint.channel;
+}
+
+static void channel_hint_apply(wifi_config_t *wifi, uint8_t channel) {
+    if (!channel) return;
+    wifi->sta.channel = channel;
+    wifi->sta.scan_method = WIFI_FAST_SCAN;
+}
+
+// 已连上：信道变了（或没存过）才写 NVS。在服务轮询里调用，不在事件回调里写闪存。
+// Connected: write NVS only if the channel changed or was never stored. Runs from the service
+// poll, not from an event callback.
+static void channel_hint_check(void) {
+    wifi_ap_record_t ap = {0};
+    if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK || ap.primary < 1 || ap.primary > 14) return;
+    char ssid[33] = {0};
+    memcpy(ssid, ap.ssid, 32);
+    if (!ssid[0] || channel_hint_load(ssid) == ap.primary) return;
+    transfer_channel_hint_t hint = {.version = 1, .channel = ap.primary};
+    memcpy(hint.ssid, ssid, sizeof(hint.ssid));
+    nvs_handle_t h;
+    esp_err_t err = credentials_open(NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(h, "chan_hint", &hint, sizeof(hint));
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    ESP_LOGI("transfer", "channel hint saved: channel %u (%s)", (unsigned)ap.primary, esp_err_to_name(err));
+}
+
 static void publish_credentials(const transfer_credentials_t *c) {
     portENTER_CRITICAL(&s_lock);
     s_status.wifi_configured = c && c->version == 1;
@@ -919,6 +979,7 @@ static esp_err_t sync_time_impl(uint32_t *utc_seconds) {
     wifi.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
     wifi.sta.pmf_cfg.capable = true;
     wifi.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+    channel_hint_apply(&wifi, channel_hint_load(saved.ssid));
     clear_secret(&saved, sizeof(saved));
     s_time_events = xEventGroupCreate();
     if (!s_time_events) { clear_secret(&wifi, sizeof(wifi)); ble_pt_network_release(); return ESP_ERR_NO_MEM; }
@@ -1224,6 +1285,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (id == WIFI_EVENT_AP_STADISCONNECTED && s_status.sta_count) s_status.sta_count--;
         if (s_status.mode == READ_PICO_TRANSFER_MODE_STA && id == WIFI_EVENT_STA_DISCONNECTED) {
             disconnected = true;
+            if (s_hint_channel && !s_connection.online) s_hint_drop = true;
             connection_lost(&s_connection, now);
             s_status.network_ready = false; s_status.url[0] = 0;
             if (s_status.state != READ_PICO_TRANSFER_UPLOADING && !s_connection.failed)
@@ -1282,7 +1344,17 @@ static void ip_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
         if (s_status.state != READ_PICO_TRANSFER_UPLOADING) s_status.state = READ_PICO_TRANSFER_READY;
     }
     portEXIT_CRITICAL(&s_lock);
-    if (accepted) ESP_LOGI("transfer", "sta ready url=%s", url);
+    if (accepted) {
+        const int64_t now = esp_timer_get_time() / 1000;
+        int8_t tx = 0;
+        wifi_ap_record_t ap = {0};
+        const bool have_tx = esp_wifi_get_max_tx_power(&tx) == ESP_OK;
+        const bool have_ap = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+        ESP_LOGI("transfer", "sta ready url=%s after %d ms (wifi start +%d ms, attempts %u, %s); "
+                 "tx power %d (x0.25 dBm), rssi %d", url,
+                 (int)(now - s_wifi_begin_ms), (int)(now - s_wifi_started_ms), s_connection.attempts,
+                 s_hint_channel ? "channel hint" : "full scan", have_tx ? tx : -1, have_ap ? ap.rssi : 0);
+    }
 }
 
 void read_pico_transfer_service_poll(void) {
@@ -1297,9 +1369,17 @@ void read_pico_transfer_service_poll(void) {
         }
     }
 
+    if (!s_hint_checked && snapshot.network_ready && claim_config()) {
+        s_hint_checked = true;
+        channel_hint_check();
+        release_config();
+    }
+
     portENTER_CRITICAL(&s_lock);
     int action = s_stopping ? 0 : connection_poll(&s_connection, now);
     unsigned attempts = s_connection.attempts;
+    const bool drop_hint = action == 1 && s_hint_drop;
+    if (drop_hint) { s_hint_drop = false; s_hint_channel = 0; }
     if (action < 0) {
         s_status.network_ready = false; s_status.url[0] = 0;
         if (s_status.state != READ_PICO_TRANSFER_UPLOADING) s_status.state = READ_PICO_TRANSFER_ERROR;
@@ -1309,6 +1389,17 @@ void read_pico_transfer_service_poll(void) {
     if (action < 0) {
         ESP_LOGW("transfer", "sta connection timeout attempts=%u", attempts);
         esp_wifi_disconnect();
+    }
+    if (drop_hint) {
+        wifi_config_t wifi = {0};
+        if (esp_wifi_get_config(WIFI_IF_STA, &wifi) == ESP_OK) {
+            wifi.sta.channel = 0;
+            wifi.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+            wifi.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+            esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &wifi);
+            ESP_LOGW("transfer", "channel hint missed; retrying with a full scan (%s)", esp_err_to_name(err));
+        }
+        clear_secret(&wifi, sizeof(wifi));
     }
     if (action == 1) {
         esp_err_t err = esp_wifi_connect();
@@ -2296,6 +2387,8 @@ esp_err_t read_pico_transfer_start(const read_pico_transfer_cfg_t *cfg) {
         (!cfg->network_only && (!cfg->root_dir || !cfg->free_bytes_cb)) ||
         (cfg->root_dir && strlen(cfg->root_dir) >= sizeof(s_root)) ||
         (cfg->mode != READ_PICO_TRANSFER_MODE_AP && cfg->mode != READ_PICO_TRANSFER_MODE_STA)) return ESP_ERR_INVALID_ARG;
+    s_wifi_begin_ms = esp_timer_get_time() / 1000;
+    s_hint_channel = 0; s_hint_drop = false; s_hint_checked = false;
     if (!cancel_time_sync(true)) return ESP_ERR_INVALID_STATE;
     if (!claim_config()) return ESP_ERR_INVALID_STATE;
     if (s_wifi || s_netif || s_http) { release_config(); return ESP_ERR_INVALID_STATE; }
@@ -2423,6 +2516,8 @@ esp_err_t read_pico_transfer_start(const read_pico_transfer_cfg_t *cfg) {
                  init.static_rx_buf_num, init.dynamic_rx_buf_num, init.mgmt_sbuf_num,
                  (unsigned)pre_internal);
     }
+    ESP_LOGI("transfer", "wifi init ampdu_tx=%d ampdu_rx=%d static_tx=%d cache_tx=%d",
+             init.ampdu_tx_enable, init.ampdu_rx_enable, init.static_tx_buf_num, init.cache_tx_buf_num);
     err = esp_wifi_init(&init);
     for (int retry = 0; err != ESP_OK && retry < 3; ++retry) {
         ESP_LOGW("transfer", "wifi init retry=%d err=%s internal free=%u largest=%u",
@@ -2460,6 +2555,8 @@ esp_err_t read_pico_transfer_start(const read_pico_transfer_cfg_t *cfg) {
         wifi.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
         wifi.sta.pmf_cfg.capable = true;
         wifi.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+        s_hint_channel = channel_hint_load(saved.ssid);
+        channel_hint_apply(&wifi, s_hint_channel);
     }
     err = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL, &s_events);
     if (err != ESP_OK) goto fail;
@@ -2532,6 +2629,10 @@ esp_err_t read_pico_transfer_start(const read_pico_transfer_cfg_t *cfg) {
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
     err = esp_wifi_start(); if (err != ESP_OK) goto fail;
     s_started = true;
+    s_wifi_started_ms = esp_timer_get_time() / 1000;
+    if (cfg->mode == READ_PICO_TRANSFER_MODE_STA)
+        ESP_LOGI("transfer", "wifi started after %d ms (%s)", (int)(s_wifi_started_ms - s_wifi_begin_ms),
+                 s_hint_channel ? "channel hint" : "full scan");
 #ifdef KIIKO_LOCAL_NETWORK_PROBE
     transfer_network_probe_start();
 #endif

@@ -51,6 +51,21 @@ void ai_toggle(void);
 void ai_get_status(ai_status_t *out);
 /// 对话进行中（占用网络与音频）。/ A chat is running (holding the network and audio).
 bool ai_active(void);
+/// 已关闭的 AI 连接还有任务在收尾（它的套接字可能还开着）。此时停 WiFi，它手里的接收缓冲会在驱动
+/// 卸载后才归还，所以要等它退出。
+/// A closed AI connection still has a task shutting down (its socket may still be open). Stopping WiFi
+/// now would let it return receive buffers after the driver is gone, so wait for it to exit.
+bool ai_net_busy(void);
+/// AI 页进出时调用。进页：后台先开音频再连 WiFi（不连 AI 服务），点开始时直接连服务；对话结束后页面还开着
+/// 就留着这两样，90 秒没有新对话才收回。离页：立即收回（对话由页面另行 ai_stop）。
+/// Call on entering and leaving the AI page. Entering: audio, then WiFi, come up in the background
+/// (without the AI service), so start goes straight to the service; after a chat both stay while the
+/// page is open, released after 90 s without a new chat. Leaving: released at once (the page stops any
+/// chat itself with ai_stop).
+void ai_page_open(bool open);
+/// 预热持有着音频和 WiFi（不在对话中）：这期间不要进入休眠。
+/// The warm-up holds audio and WiFi (no chat running): do not go idle meanwhile.
+bool ai_warm_held(void);
 /// AI 说话时界面想刷屏就调用：返回 true 表示语音正处在停顿（或尚未起播），现在刷屏不会出破音，
 /// 播放会暂停等刷完；返回 false 表示已登记，等下一个停顿。刷完后（下一次 tick）调用 ai_redraw_done。
 /// Call while the AI speaks and the page wants to redraw: true means speech is at a pause (or not yet

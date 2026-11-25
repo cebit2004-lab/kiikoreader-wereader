@@ -46,6 +46,7 @@
 #include "freertos/task.h"
 #include "media_net.h"
 #include "metalio_audio.h"
+#include "psram_stream.h"
 #include "read_pico_transfer.h"
 
 #if __has_include("music_secrets.h")
@@ -384,7 +385,9 @@ static void net_task(void *arg) {
             if (empty) { s_net_task = NULL; ring = s_ring; s_ring = NULL; }
             taskEXIT_CRITICAL(&s_net_mux);
             if (!empty) continue;
-            if (ring) vStreamBufferDeleteWithCaps(ring);  // 解码任务已停，不再读它 / the decoder has stopped reading it
+            // 解码任务已停，不再读它；不用 IDF 6.1 有缺陷的 WithCaps 删除（见 psram_stream.h）。
+            // The decoder has stopped reading it; avoids the faulty IDF 6.1 WithCaps delete (see psram_stream.h).
+            if (ring) psram_stream_delete(ring);
             media_net_release_if_unused();
             ESP_LOGI(TAG, "network task exits");
             vTaskDeleteWithCaps(NULL);
@@ -550,7 +553,7 @@ static int pick_next(int current, int dir) {
 // 播放时才分配环形缓冲，联网任务空闲退出时释放。/ Allocate the ring only for playback; the idle network task frees it.
 static bool ensure_ring(void) {
     for (size_t i = 0; !s_ring && i < sizeof(k_ring_sizes) / sizeof(k_ring_sizes[0]); ++i) {
-        s_ring = xStreamBufferCreateWithCaps(k_ring_sizes[i], 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_ring = psram_stream_create(k_ring_sizes[i], 1);
         if (s_ring) {
             s_ring_bytes = k_ring_sizes[i];
             ESP_LOGI(TAG, "ring buffer %u KB", (unsigned)(s_ring_bytes / 1024));

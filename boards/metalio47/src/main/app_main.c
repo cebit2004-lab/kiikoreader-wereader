@@ -178,9 +178,13 @@ void app_main(void) {
     read_pico_handle_t hw;
     if (read_pico_init(&hw) != ESP_OK) return;
     rp_boot_mark("hw");
-    // 板载音频：只建锁与 PSRAM 缓冲，BH1098G 在首次播放时才切到本机音频模式。
-    // On-board audio: locks and PSRAM buffers only; the BH1098G switches to local audio on first use.
+    // 板载音频：建锁与 PSRAM 缓冲，并在后台把 BH1098G 切到本机音频模式（约 2 秒，不挡开机）。
+    // 原先等首次播放才切，开机后第一次进 AI 页要多等约 2.5 秒；芯片电源开机即通，切完串口驱动随即卸掉。
+    // On-board audio: locks and PSRAM buffers, then switch the BH1098G to local audio in the
+    // background (about 2 s, boot does not wait). Switching on first use instead added about 2.5 s to
+    // the first AI page after boot; the chip's rail is on from boot and the UART driver goes once done.
     if (metalio_audio_init() != ESP_OK) ESP_LOGW(TAG, "audio init failed");
+    else metalio_audio_prepare();
     if (music_init() != ESP_OK) ESP_LOGW(TAG, "music init failed");
     if (ai_init() != ESP_OK) ESP_LOGW(TAG, "ai init failed");
     if (hw.pmu_ready) {

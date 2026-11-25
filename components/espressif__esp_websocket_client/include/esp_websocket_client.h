@@ -405,6 +405,23 @@ int esp_websocket_client_send_with_opcode(esp_websocket_client_handle_t client, 
 esp_err_t esp_websocket_client_close(esp_websocket_client_handle_t client, TickType_t timeout);
 
 /**
+ * kiikoreader 本地补丁：从别的任务关掉连接的套接字（shutdown，不加锁），卡在其上的收发立即出错返回，
+ * 随后的 esp_websocket_client_destroy() 不必等网络超时。esp_websocket_client_close() 发关闭帧时
+ * 无限期等客户端锁，而接收任务在一帧中途卡住时会一直占着这把锁，所以不能用它来收尾。
+ *
+ * kiikoreader local patch: shut the connection's socket down from another task (shutdown, no lock
+ * taken), so a send or receive blocked on it fails at once and a following
+ * esp_websocket_client_destroy() need not wait out the network. esp_websocket_client_close() waits
+ * forever for the client lock to send its CLOSE frame, and the receive task holds that lock for as
+ * long as it is stuck mid-frame, so it cannot be used to tear down.
+ *
+ * @param[in]  client  The client
+ *
+ * @return     ESP_OK, ESP_ERR_INVALID_ARG without a transport, ESP_ERR_INVALID_STATE without a socket
+ */
+esp_err_t esp_websocket_client_abort_socket(esp_websocket_client_handle_t client);
+
+/**
  * @brief      Close the WebSocket connection in a clean way with custom code/data
  *             Closing sequence is the same as for esp_websocket_client_close()
  *

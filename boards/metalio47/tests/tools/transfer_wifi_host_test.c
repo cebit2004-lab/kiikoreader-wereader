@@ -213,8 +213,8 @@ int main(void) {
     connection_begin(&net, 0); net.online = true;
     assert(connection_poll(&net, 100000) == 0);
     connection_lost(&net, 100000);
-    assert(connection_poll(&net, 100999) == 0);
-    assert(connection_poll(&net, 101000) == 1 && net.attempts == 1);
+    assert(connection_poll(&net, 100299) == 0);
+    assert(connection_poll(&net, 100300) == 1 && net.attempts == 1);
     assert(time_route(true, true, true, false) == TRANSFER_TIME_ONLINE);
     assert(time_route(true, true, false, false) == TRANSFER_TIME_UNAVAILABLE);
     assert(time_route(true, false, true, false) == TRANSFER_TIME_UNAVAILABLE);

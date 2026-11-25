@@ -8,5 +8,6 @@ endif()
 idf_component_register(SRCS "music_player.c" "media_net.c" "ai_voice.c" INCLUDE_DIRS "include" PRIV_INCLUDE_DIRS "."
     REQUIRES esp_common
     PRIV_REQUIRES metalio_audio freertos log heap esp_hw_support esp_http_client mbedtls
-                  espressif__cjson read_pico_transfer esp_timer espressif__esp_websocket_client esp_wifi)
+                  espressif__cjson read_pico_transfer esp_timer espressif__esp_websocket_client esp_wifi
+                  esp_netif lwip)
 target_compile_options(${COMPONENT_LIB} PRIVATE -O2 -Wno-unused-function)

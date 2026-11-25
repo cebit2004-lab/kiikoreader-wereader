@@ -6,6 +6,7 @@
 #pragma once
 #include <stdbool.h>
 #include "esp_wifi.h"
+#include "sdkconfig.h"
 /*
  * 单位 0.25 dBm。官方文档给的 48（12 dBm）在近距离传书够用，但换成公网取章包就露馅了：
  * 实测下行每 16 秒停一次（上行 ACK 到不了路由器，下行只能等重传），3 MB 的章包 120 秒只
@@ -25,14 +26,47 @@
 /* 试验：60（15 dBm）介于官方 48 与 72 之间，看能否在不欠压的前提下减轻上行丢包导致的下载卡顿。
  * Trial: 60 (15 dBm) sits between the documented 48 and 72, to ease uplink-loss download stalls
  * without tripping the brownout reset. */
-#define TRANSFER_S31_MAX_TX_POWER 60
+/* 试验（2026-11-25）：68（17 dBm）。AI 对话日志里 15 dBm 下上传录音时 1400 字节的包仍被路由器反复漏收
+ * （单次发送卡 2–8 秒直至断线），下行一直正常。若出现欠压复位（reset_reason=9）就退回 60。
+ * Trial (2026-11-25): 68 (17 dBm). At 15 dBm, AI chat logs still show the router repeatedly missing
+ * 1400-byte upload packets (single sends stalling 2–8 s until the link drops) while the downlink is
+ * fine. Back to 60 if a brownout reset (reset_reason=9) shows up. */
+#define TRANSFER_S31_MAX_TX_POWER 68
+/*
+ * 动态 RX 缓冲的上限。它们按帧从堆里取，开了 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP 时优先放 PSRAM
+ * （esp_adapter.c 的 wifi_malloc），不在 esp_wifi_init 时预分配，压低它省不下内部 RAM；它只限制
+ * “同时压在协议栈里的接收帧”个数：帧要等 lwIP 交给应用（或乱序队列放掉）才归还。原来瘦身档压到
+ * 8 个，而 TCP 接收窗口是 64 KB（约 45 帧）：对方按窗口一次发多了，第 9 帧起驱动直接丢；丢一帧后
+ * 后面的帧进乱序队列占住缓冲，连补发的那一帧都收不下，只能等超时清队列。AI 对话日志里下行一停
+ * 十几秒、随后新连接的握手应答也收不到，正是这种情况。有 PSRAM 时保持 sdkconfig 的 64 个。
+ * Cap on dynamic RX buffers. They are taken from the heap per frame and, with
+ * CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP, prefer PSRAM (wifi_malloc in esp_adapter.c); nothing is
+ * preallocated by esp_wifi_init, so lowering the cap saves no internal RAM. It only limits how many
+ * received frames may sit in the stack at once: a frame is returned only after lwIP hands it to the
+ * application (or the out-of-order queue drops it). The slim levels used to cut it to 8 while the TCP
+ * receive window is 64 KB (~45 frames): when the peer sends a window's worth, the driver drops
+ * everything from the 9th frame on; after one loss, later frames wait in the out-of-order queue and
+ * hold the buffers, so even the retransmission that would fill the gap cannot be received until the
+ * queue times out. The AI chat logs show exactly that: the downlink stops for over ten seconds and the
+ * handshake replies of new connections go unanswered. With PSRAM, keep the sdkconfig value of 64.
+ */
+#ifdef CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP
+#define TRANSFER_S31_MIN_DYNAMIC_RX 64
+#else
+#define TRANSFER_S31_MIN_DYNAMIC_RX 0
+#endif
+// 只往下压到上面的下限。/ Lower the cap, but never below the floor above.
+static inline void transfer_s31_cap_dynamic_rx(wifi_init_config_t *init, int cap) {
+    if (cap < TRANSFER_S31_MIN_DYNAMIC_RX) cap = TRANSFER_S31_MIN_DYNAMIC_RX;
+    if (init->dynamic_rx_buf_num > cap) init->dynamic_rx_buf_num = cap;
+}
 // Short STA sessions (network scan, time sync and low-RAM connection starts) do
 // not need an AP receive aggregation window. Keep their DMA-backed RX footprint
 // small enough for the S31's 64 KiB internal allocation reserve.
 static inline void transfer_s31_constrained_sta_config(wifi_init_config_t *init) {
     if (!init) return;
     if (init->static_rx_buf_num > 3) init->static_rx_buf_num = 3;
-    if (init->dynamic_rx_buf_num > 16) init->dynamic_rx_buf_num = 16;
+    transfer_s31_cap_dynamic_rx(init, 16);
     init->ampdu_rx_enable = false;
 }
 
@@ -65,12 +99,12 @@ static inline void transfer_s31_slim_sta_config(wifi_init_config_t *init, int le
     if (init->mgmt_sbuf_num > 8) init->mgmt_sbuf_num = 8;
     if (init->cache_tx_buf_num > 2) init->cache_tx_buf_num = 2;
     if (level >= 1) {
-        if (init->dynamic_rx_buf_num > 8) init->dynamic_rx_buf_num = 8;
+        transfer_s31_cap_dynamic_rx(init, 8);
         if (init->static_tx_buf_num > 4) init->static_tx_buf_num = 4;
     }
-    if (level == 0 && init->dynamic_rx_buf_num > 12) init->dynamic_rx_buf_num = 12;
+    if (level == 0) transfer_s31_cap_dynamic_rx(init, 12);
     if (level >= 2) {
-        if (init->dynamic_rx_buf_num > 4) init->dynamic_rx_buf_num = 4;
+        transfer_s31_cap_dynamic_rx(init, 4);
         if (init->static_tx_buf_num > 3) init->static_tx_buf_num = 3;
         // 管理短缓冲的下限是 6，再少驱动会拒绝初始化。/ The driver refuses fewer than 6.
         if (init->mgmt_sbuf_num > 6) init->mgmt_sbuf_num = 6;

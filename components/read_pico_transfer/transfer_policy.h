@@ -164,10 +164,19 @@ static void connection_reset(transfer_connection_t *c, int64_t now) {
     *c = (transfer_connection_t){.pending = true, .deadline_ms = now + 30000, .next_ms = now};
 }
 
+/* 断开后多久重连。metalio47 用 0.3 秒：驱动报断开时射频已经空闲，多等只是白白拖慢重连。
+ * How long to wait before reconnecting. metalio47 uses 0.3 s: the radio is already idle when the
+ * driver reports the disconnect, so waiting longer only delays the reconnect. */
+#if KIIKO_BOARD_METALIO47
+#define TRANSFER_RECONNECT_DELAY_MS 300
+#else
+#define TRANSFER_RECONNECT_DELAY_MS 1000
+#endif
+
 static void connection_lost(transfer_connection_t *c, int64_t now) {
     if (c->failed) return;
     if (c->online) connection_begin(c, now);
-    c->online = false; c->pending = true; c->next_ms = now + 1000;
+    c->online = false; c->pending = true; c->next_ms = now + TRANSFER_RECONNECT_DELAY_MS;
 }
 
 /*

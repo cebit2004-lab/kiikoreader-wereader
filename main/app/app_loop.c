@@ -1792,7 +1792,7 @@ void app_loop_run(const app_loop_config_t* config) {
         unsigned requested_idle = app_settings_auto_lock_minutes();
 #if KIIKO_BOARD_METALIO47
         // 播放音乐时不自动锁屏（锁屏会停掉 WiFi 与 I2S）。/ No idle lock during music: locking stops WiFi and I2S.
-        bool idle_blocked = app_sd_recovery_busy() || usb_storage_active() || app_download_active() || wifi_busy || music_active() || ai_active() || current == &app_transfer ||
+        bool idle_blocked = app_sd_recovery_busy() || usb_storage_active() || app_download_active() || wifi_busy || music_active() || ai_active() || ai_net_busy() || ai_warm_held() || current == &app_transfer ||
 #else
         bool idle_blocked = usb_storage_active() || wifi_busy || current == &app_transfer ||
 #endif
