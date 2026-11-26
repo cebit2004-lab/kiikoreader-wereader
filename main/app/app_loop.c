@@ -442,9 +442,20 @@ static void app_present_impl(app_ctx_t* ctx, const app_desc_t* app, app_redraw_t
         if (app->render) app->render(ctx, ctx->fb);
         // 动画和高层区域都使用旋转后逻辑坐标；物理全屏会触发裁剪错误与整屏恢复。
         // Animation/high-level areas use rotated logical coordinates; a physical full screen causes crop failure and full recovery.
+        // 上一页没有底栏（如从 AI 页、音乐页返回）：底栏区域还是旧画面，DU 只有黑白，画不出底栏的浅灰背景。
+        // 这时和读完书回书架一样，整屏用主页灰阶波形刷一次（update_display_fast_page），底栏一并画好，不另闪。
+        // 底栏已在屏上时照旧只刷到底栏上沿。
+        // The previous page had no navigation bar (returning from the AI or music page): that strip still shows
+        // the old page, and DU is black-and-white only, so it cannot draw the bar's light-gray background. Then,
+        // as when leaving a book for the shelf, refresh the whole screen once with the main gray waveform
+        // (update_display_fast_page), drawing the bar in the same pass with no separate flash. With the bar
+        // already on screen, refresh down to its top as before.
+        const bool nav_on_screen=s_presented_main!=NULL;
+        const bool draw_nav=!nav_on_screen&&navigation_page_ready(ctx,app);
         const EpdRect screen={0,0,epd_rotated_display_width(),
             navigation_page_ready(ctx,app)?UI_NAV_MARKER_SCAN_END:epd_rotated_display_height()};
-        result = redraw == APP_REDRAW_FULL ? update_display_full(ctx->hl) : returning || root_water
+        result = redraw == APP_REDRAW_FULL ? update_display_full(ctx->hl) : draw_nav ? update_display_fast_page(ctx->hl)
+            : returning || root_water
             ? (app->grayscale_ui&&app->grayscale_ui(ctx)
                 ? update_display_main_turn(ctx->hl,screen,returning?E0470_TURN_LTR:E0470_TURN_RTL)
                 : update_display_water_turn(ctx->hl,screen,returning?E0470_TURN_LTR:E0470_TURN_RTL))

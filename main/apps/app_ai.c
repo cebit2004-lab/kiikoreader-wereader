@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_log.h"
 #include "ai_voice.h"
 #include "app.h"
 #include "app_registry.h"
@@ -33,6 +34,8 @@
 // Back: to the Apps page when opened from it, otherwise home (never the root menu).
 extern const app_desc_t *g_apps_origin;
 static void go_back(app_ctx_t *ctx) {
+    ESP_LOGI("app_ai", "back -> %s (origin %s, pending %s)", g_apps_origin ? "origin" : "home",
+             g_apps_origin ? g_apps_origin->title : "-", ctx->request_app ? ctx->request_app->title : "-");
     ctx->request_app = g_apps_origin ? g_apps_origin : app_home_page();
     g_apps_origin = NULL;
 }

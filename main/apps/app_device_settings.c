@@ -1480,7 +1480,11 @@ static void render_content(app_ctx_t *ctx, uint8_t *fb) {
     if (s_page == SETTINGS_AUTO_LOCK) {
         back_header(fb, "自动休眠锁屏");
         section(fb, 228, "无操作后自动锁屏");
+#if KIIKO_BOARD_METALIO47
+        const char *labels[] = {"90 秒", "5 分钟", "10 分钟", "关闭"};
+#else
         const char *labels[] = {"1 分钟", "5 分钟", "10 分钟", "关闭"};
+#endif
         const uint8_t values[] = {1, 5, 10, 0};
         for (int i = 0; i < 4; ++i) {
             EpdRect box = {36, 272 + i * 112, 612, 92};
@@ -1781,6 +1785,9 @@ static void render_content(app_ctx_t *ctx, uint8_t *fb) {
     snprintf(font_name,sizeof(font_name),"%s · %u%%",system_font_label(app_settings_system_font_path()),app_settings_system_font_size());
     snprintf(contrast,sizeof(contrast),"%u%%",app_settings_system_contrast());
     unsigned minutes=app_settings_auto_lock_minutes();
+#if KIIKO_BOARD_METALIO47
+    if(minutes==1)snprintf(idle,sizeof(idle),"%s","90 秒");else
+#endif
     if(minutes)snprintf(idle,sizeof(idle),"%u 分钟",minutes);else snprintf(idle,sizeof(idle),"%s","关闭");
 #if KIIKO_BOARD_METALIO47
     const char *display_labels[]={"系统字体","系统对比度","主页刷新模式","首页强刷","自动休眠锁屏","双击解锁","关机睡眠","前光与振动","语言"};
