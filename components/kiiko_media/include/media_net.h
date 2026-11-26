@@ -25,6 +25,20 @@ void media_net_drop(void);
 /// 音乐与 AI 都不再需要时断开本模块启动的 WiFi。/ Drop WiFi this module started once neither music nor AI needs it.
 void media_net_release_if_unused(void);
 
+/// 向网关的丢弃端口发 30 个 1 字节 UDP 包，推通刚连上 WiFi 时卡住的上行（见 media_net.c）。sent/failed 可为 NULL。
+/// Send 30 one-byte UDP packets to the gateway's discard port to open the uplink that stalls right
+/// after joining WiFi (see media_net.c). sent/failed may be NULL.
+void media_net_uplink_nudge(int *sent, int *failed);
+
+/// 这次连上 WiFi 后还没打通过上行时：推上行并向 host:port 建一次 TCP 连接，没连上就每秒再推，连通即关闭。
+/// 最多 8 秒；cancel 变真或 keep 返回 false 时立即停。已打通过就直接返回。返回打通用的毫秒数，
+/// 已打通返回 0，没打通返回 -1。会阻塞，只在联网任务里调用。
+/// Once per WiFi connection: push the uplink and open one TCP connection to host:port, pushing again
+/// each second until it connects, then close it. At most 8 s; stops at once when cancel turns true or
+/// keep returns false. Returns at once if already open. Returns the milliseconds it took, 0 if already
+/// open, -1 if not opened. Blocks; call from a network task only.
+int media_net_ensure_uplink(const char *host, int port, const volatile bool *cancel, bool (*keep)(void));
+
 #ifdef __cplusplus
 }
 #endif

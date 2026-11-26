@@ -82,7 +82,7 @@ static size_t s_ring_bytes;
 
 typedef enum { CMD_PLAY, CMD_TOGGLE, CMD_NEXT, CMD_PREV, CMD_STOP } cmd_type_t;
 typedef struct { cmd_type_t type; int arg; SemaphoreHandle_t done; } cmd_t;
-typedef enum { NET_LIST, NET_STREAM } net_type_t;
+typedef enum { NET_LIST, NET_STREAM, NET_WARM } net_type_t;
 typedef struct {
     net_type_t type;
     music_source_t source;  // NET_LIST
@@ -93,6 +93,13 @@ typedef struct {
 
 #define NET_STACK (10 * 1024)
 #define NET_IDLE_MS 30000
+// 音乐页开着时联网保留到最后一次操作后 90 秒（同 AI 页），接着点歌不用重新连；离开页面后照旧 30 秒空闲收回。
+// While the music page is open, keep the network until 90 s after the last request (as the AI page
+// does) so playing a song needs no fresh connection; after leaving, the usual 30 s idle release.
+#define NET_HOLD_MS 90000
+#define NET_POLL_MS 5000
+static _Atomic bool s_page_open;
+static _Atomic int64_t s_last_req_us;
 
 static SemaphoreHandle_t s_lock;
 static QueueHandle_t s_cmd_q, s_net_q;
@@ -185,6 +192,23 @@ done:
     return body;
 }
 
+// 打通刚连上 WiFi 时卡住的上行（见 media_net_ensure_uplink），目标是点歌服务的主机和端口。
+// Open the uplink that stalls right after joining WiFi (see media_net_ensure_uplink), towards the music
+// service's host and port.
+static void open_uplink(void) {
+    const char *p = strstr(MUSIC_BASE, "://");
+    if (!p) return;
+    p += 3;
+    char host[96];
+    size_t n = strcspn(p, ":/");
+    if (!n || n >= sizeof(host)) return;
+    memcpy(host, p, n);
+    host[n] = 0;
+    int port = strncmp(MUSIC_BASE, "https", 5) ? 80 : 443;
+    if (p[n] == ':') port = atoi(p + n + 1);
+    (void)media_net_ensure_uplink(host, port, NULL, NULL);
+}
+
 // ---------------------------------------------------------------- list task
 
 static void load_list(const net_req_t *req_in) {
@@ -199,7 +223,11 @@ static void load_list(const net_req_t *req_in) {
         } else {
             snprintf(path, sizeof(path), "%s?limit=%d&offset=%d", paths[req->source], MUSIC_PAGE_SIZE, req->offset);
         }
-        char *body = media_net_acquire(err, sizeof(err), NULL) ? api_get(path, err, sizeof(err)) : NULL;
+        char *body = NULL;
+        if (media_net_acquire(err, sizeof(err), NULL)) {
+            open_uplink();
+            body = api_get(path, err, sizeof(err));
+        }
         cJSON *root = body ? cJSON_Parse(body) : NULL;
         if (body && !root) snprintf(err, sizeof(err), "列表格式不对");
         if (body) heap_caps_free(body);
@@ -356,6 +384,7 @@ static void stream_track(const net_req_t *req) {
         if (metalio_audio_open(AUDIO_RATE, false) != ESP_OK) { dl_finish(req->gen, "音频设备不可用"); return; }
         if (!media_net_acquire(err, sizeof(err), NULL)) { dl_finish(req->gen, err); return; }
     }
+    open_uplink();  // 预热过就立即返回 / returns at once after a warm-up
     snprintf(path, sizeof(path), "/url?id=%s", req->text);
     char *body = api_get(path, err, sizeof(err));
     cJSON *root = body ? cJSON_Parse(body) : NULL;
@@ -375,10 +404,12 @@ static void net_task(void *arg) {
     (void)arg;
     net_req_t req;
     for (;;) {
-        if (xQueueReceive(s_net_q, &req, pdMS_TO_TICKS(NET_IDLE_MS)) != pdTRUE) {
-            // 空闲：没在播放就收回网络并退出，把内部 RAM 还回去。
-            // Idle: when not playing, release the network and exit to return the internal RAM.
+        if (xQueueReceive(s_net_q, &req, pdMS_TO_TICKS(NET_POLL_MS)) != pdTRUE) {
+            // 空闲：没在播放、也过了保留时间就收回网络并退出，把内部 RAM 还回去。
+            // Idle: when not playing and past the hold, release the network and exit to return the internal RAM.
             if (music_active()) continue;
+            const int64_t idle_ms = (esp_timer_get_time() - atomic_load(&s_last_req_us)) / 1000;
+            if (idle_ms < (atomic_load(&s_page_open) ? NET_HOLD_MS : NET_IDLE_MS)) continue;
             StreamBufferHandle_t ring = NULL;
             taskENTER_CRITICAL(&s_net_mux);
             const bool empty = uxQueueMessagesWaiting(s_net_q) == 0 && !music_active();
@@ -392,12 +423,23 @@ static void net_task(void *arg) {
             ESP_LOGI(TAG, "network task exits");
             vTaskDeleteWithCaps(NULL);
         }
-        if (req.type == NET_LIST) {
+        if (req.type == NET_WARM) {
+            // 打开音乐页：先连上 WiFi 并打通上行，点歌时直接开始。/ Music page opened: join WiFi and open the uplink now, so a song starts at once.
+            char err[64] = {0};
+            const int64_t t0 = esp_timer_get_time();
+            if (media_net_acquire(err, sizeof(err), NULL)) {
+                open_uplink();
+                ESP_LOGI(TAG, "warm: network ready in %d ms", (int)((esp_timer_get_time() - t0) / 1000));
+            } else {
+                ESP_LOGW(TAG, "warm: %s", err);
+            }
+        } else if (req.type == NET_LIST) {
             // 只处理最新的列表请求。/ Only the latest list request matters.
             net_req_t next;
             while (xQueuePeek(s_net_q, &next, 0) == pdTRUE && next.type == NET_LIST) xQueueReceive(s_net_q, &req, 0);
             load_list(&req);
-            if (!music_active()) media_net_release_if_unused();
+            // 不在这里收网：联网任务在期间算作占用，空闲退出时再收（见 music_net_busy）。
+            // No release here: the network counts as in use while this task lives; it is released when the task exits idle.
         } else {
             stream_track(&req);
         }
@@ -406,6 +448,7 @@ static void net_task(void *arg) {
 
 // 投递联网请求，必要时以内部 RAM 栈创建联网任务。/ Post a network request, creating the task with an internal stack if needed.
 static void net_post(const net_req_t *req) {
+    atomic_store(&s_last_req_us, esp_timer_get_time());
     xQueueSend(s_net_q, req, pdMS_TO_TICKS(200));
     taskENTER_CRITICAL(&s_net_mux);
     const bool need = s_net_task == NULL;
@@ -708,6 +751,17 @@ void music_load(music_source_t source, const char *query, int offset) {
     net_post(&req);
 }
 
+void music_page_open(bool open) {
+    atomic_store(&s_page_open, open);
+    if (!open || !s_net_q) return;
+    if (!music_active()) {
+        const net_req_t req = {.type = NET_WARM};
+        net_post(&req);
+    } else {
+        atomic_store(&s_last_req_us, esp_timer_get_time());
+    }
+}
+
 bool music_list_track(int index, music_track_t *out) {
     if (!s_lock || !out) return false;
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -747,4 +801,9 @@ void music_get_status(music_status_t *out) {
 }
 
 bool music_active(void) { return s_st.state != MUSIC_STOPPED; }
-bool music_net_busy(void) { return s_st.state != MUSIC_STOPPED || s_st.list_loading; }
+bool music_net_busy(void) {
+    // 联网任务还在（含音乐页开着时的保留期）也算占用，免得 AI 结束时把预热好的 WiFi 收掉。
+    // The network task being alive (including the hold while the music page is open) counts as use, so an
+    // AI chat ending does not drop the warmed-up WiFi.
+    return s_st.state != MUSIC_STOPPED || s_st.list_loading || s_net_task != NULL;
+}

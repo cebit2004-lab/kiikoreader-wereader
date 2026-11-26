@@ -49,6 +49,9 @@ static void go_back(app_ctx_t *ctx) {
 
 static view_t s_view;
 static int s_page;
+// 从「应用」页卡片上的入口进来时要打开的来源，-1 为没有。/ Source picked on the Apps card, -1 for none.
+static int s_entry_source = -1;
+void app_music_open_source(int source) { s_entry_source = source; }
 static unsigned s_drawn_sig;
 static int s_drawn_pos;
 static char s_query_draft[MUSIC_QUERY_MAX];
@@ -385,8 +388,17 @@ static EpdRect area_hint(app_ctx_t *ctx) { (void)ctx; return progress_rect(); }
 static void on_enter(app_ctx_t *ctx) {
     (void)ctx;
     s_view = VIEW_LIST;
+    music_page_open(true);
+    const int entry = s_entry_source;
+    s_entry_source = -1;
+    if (entry == MUSIC_SRC_SEARCH) { open_search(); return; }
     music_status_t st;
     music_get_status(&st);
+    if (entry >= 0 && entry < MUSIC_SRC_COUNT && (st.list_source != (music_source_t)entry || st.list_count == 0)) {
+        music_load((music_source_t)entry, NULL, 0);
+        s_page = 0;
+        return;
+    }
     // 首次进入或上次失败时加载热歌榜。/ Load the hot chart on first entry or after a failure.
     if (st.list_count == 0 && !st.list_loading && st.list_source != MUSIC_SRC_SEARCH) music_load(st.list_source, NULL, st.list_offset);
     s_page = st.queue_index >= 0 && st.queue_source == st.list_source && st.queue_offset == st.list_offset
@@ -395,6 +407,7 @@ static void on_enter(app_ctx_t *ctx) {
 
 static void music_exit(app_ctx_t *ctx) {
     (void)ctx;
+    music_page_open(false);
     if (s_view == VIEW_SEARCH) ui_keyboard_end();
     s_view = VIEW_LIST;
 }

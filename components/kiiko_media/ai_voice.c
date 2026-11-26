@@ -1808,21 +1808,8 @@ static void log_task_states(const char *why) {
 static int64_t s_connect_us, s_nudge_us;
 
 static void uplink_nudge(void) {
-    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    esp_netif_ip_info_t info;
-    if (!sta || esp_netif_get_ip_info(sta, &info) != ESP_OK || !info.gw.addr) return;
-    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) return;
-    struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons(9)};
-    addr.sin_addr.s_addr = info.gw.addr;
     int sent = 0, failed = 0;
-    const uint8_t byte = 0;
-    for (int i = 0; i < 30; ++i) {
-        if (sendto(fd, &byte, 1, 0, (struct sockaddr *)&addr, sizeof(addr)) == 1) ++sent;
-        else ++failed;
-        vTaskDelay(pdMS_TO_TICKS(5));  // 留时间给驱动发出去，免得发送缓冲一下占满 / let the driver drain its few TX buffers
-    }
-    close(fd);
+    media_net_uplink_nudge(&sent, &failed);
     ai_log("uplink nudge at %d ms into connect: %d sent, %d refused",
            (int)((esp_timer_get_time() - s_connect_us) / 1000), sent, failed);
 }
@@ -2038,65 +2025,15 @@ static void warm_release(const char *why) {
     log_flush();
 }
 
-/*
- * 预热时先打通上行，再向 AI 服务器建一次 TCP 连接。实测（2026-11-26）：拿到地址后只等不发，8 秒内连接
- * 请求一个回应都没有；随后会话推了一次上行（见 uplink_nudge），重发的请求 80 ms 就有了回应。所以卡住的
- * 不是时间，而是要先发出一批包。这里先推一次，没连上就每秒再推，连通即复位关闭，不占名额。最多等
- * 8 秒，取消或离开页面立刻停。
- * Open the uplink during warm-up, then make one TCP connection to the AI host. Measured (2026-11-26):
- * waiting without sending, not one connection request was answered in 8 s; the session then pushed
- * the uplink (see uplink_nudge) and the retransmitted request was answered 80 ms later. So the stall is
- * not a matter of time; a batch of packets has to go out first. Push once here, again each second
- * until connected; once through, the connection is reset so it holds no slot. At most 8 s, stopping at
- * once on cancel or when the page closes.
- */
-#define PRECONNECT_MAX_MS 8000
+// 预热时打通上行（见 media_net_ensure_uplink），让刚连上 WiFi 时的卡顿在用户看页面时过去。
+// Open the uplink during warm-up (see media_net_ensure_uplink), so the stall right after joining
+// WiFi passes while the user is looking at the page.
+static bool page_still_open(void) { return atomic_load(&s_page_open); }
 
-static void tcp_preconnect(void) {
-    const int64_t t0 = esp_timer_get_time();
-    s_connect_us = t0;
-    uplink_nudge();
-    int64_t nudged = esp_timer_get_time();
-    const struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
-    struct addrinfo *res = NULL;
-    if (getaddrinfo(RT_HOST, "443", &hints, &res) != 0 || !res) {
-        ai_log("warm: tcp pre-connect skipped (dns failed)");
-        return;
-    }
-    const int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) { freeaddrinfo(res); return; }
-    const struct linger lg = {.l_onoff = 1, .l_linger = 0};
-    setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
-    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
-    int r = connect(fd, res->ai_addr, res->ai_addrlen);
-    freeaddrinfo(res);
-    const char *how = "failed";
-    if (r == 0) {
-        how = "connected";
-    } else if (errno == EINPROGRESS) {
-        // 分段等，好及时响应取消和离开页面。/ Wait in slices so cancel and page close take effect promptly.
-        while (!s_cancel && atomic_load(&s_page_open) && (esp_timer_get_time() - t0) / 1000 < PRECONNECT_MAX_MS) {
-            fd_set wr;
-            FD_ZERO(&wr);
-            FD_SET(fd, &wr);
-            struct timeval wait = {.tv_sec = 0, .tv_usec = 200 * 1000};
-            if (select(fd + 1, NULL, &wr, NULL, &wait) != 1) {
-                if (esp_timer_get_time() - nudged > 1000000) {
-                    uplink_nudge();
-                    nudged = esp_timer_get_time();
-                }
-                continue;
-            }
-            int soerr = -1;
-            socklen_t len = sizeof(soerr);
-            how = getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len) == 0 && soerr == 0 ? "connected" : "failed";
-            break;
-        }
-        if (!strcmp(how, "failed") && (s_cancel || !atomic_load(&s_page_open))) how = "stopped";
-        else if (!strcmp(how, "failed") && (esp_timer_get_time() - t0) / 1000 >= PRECONNECT_MAX_MS) how = "timed out";
-    }
-    close(fd);
-    ai_log("warm: tcp pre-connect %s after %d ms", how, (int)((esp_timer_get_time() - t0) / 1000));
+static void open_uplink(const char *why, bool (*keep)(void)) {
+    const int ms = media_net_ensure_uplink(RT_HOST, 443, &s_cancel, keep);
+    if (ms > 0) ai_log("%s: uplink opened in %d ms", why, ms);
+    else if (ms < 0) ai_log("%s: uplink not confirmed", why);
 }
 
 static void warm_up(void) {
@@ -2122,8 +2059,8 @@ static void warm_up(void) {
                    (int)((esp_timer_get_time() - t_i2s) / 1000));
     else ai_log("warm: wifi not ready yet (%s)", s_cancel ? "cancelled" : err);
     if (ok) {
-        ctl_step("warm: tcp");
-        tcp_preconnect();
+        ctl_step("warm: uplink");
+        open_uplink("warm", page_still_open);
         s_warm_until_us = esp_timer_get_time() + (int64_t)WARM_HOLD_MS * 1000;
     }
     // 离开了页面就收回；还在页面上就留着，点开始时会接着等 WiFi。
@@ -2224,6 +2161,8 @@ static void session_start(void) {
     const int64_t t_i2s = esp_timer_get_time();
     if (s_cancel) { session_end(NULL); return; }
     if (!media_net_acquire(err, sizeof(err), &s_cancel)) { session_end(s_cancel ? NULL : err); return; }
+    ctl_step("start: uplink");
+    open_uplink("start", NULL);  // 预热过就立即返回 / returns at once after a warm-up
     if (s_cancel) { session_end(NULL); return; }
     ai_log("wifi + i2s ready: i2s %d Hz measured %d; audio %d ms, wifi %d ms", metalio_audio_sample_rate(),
            metalio_audio_actual_rate(), (int)((t_i2s - t_start) / 1000), (int)((esp_timer_get_time() - t_i2s) / 1000));

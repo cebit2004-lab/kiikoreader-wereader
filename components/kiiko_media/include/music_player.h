@@ -65,6 +65,10 @@ typedef struct {
 esp_err_t music_init(void);
 /// 异步加载列表；source 为 SEARCH 时用 query。/ Load a list asynchronously; query is used for SEARCH.
 void music_load(music_source_t source, const char *query, int offset);
+/// 音乐页打开/离开。打开时在后台连上 WiFi 并打通上行；页面开着时联网保留到最后一次操作后 90 秒。
+/// The music page opened or left. On open, join WiFi and open the uplink in the background; while the
+/// page is open the network is kept until 90 s after the last request.
+void music_page_open(bool open);
 /// 当前列表中的一项。/ One entry of the current list.
 bool music_list_track(int index, music_track_t *out);
 /// 用当前列表作为播放队列，从 index 开始播放。/ Use the current list as the queue and play from index.
