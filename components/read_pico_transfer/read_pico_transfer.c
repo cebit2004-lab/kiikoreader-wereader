@@ -19,6 +19,7 @@
 #include "ui_locale_format.h"
 #endif
 #include "read_pico_search.h"
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -724,55 +725,83 @@ static void release_config(void) {
 }
 
 /*
- * 记住信道：连上后把路由器的信道存进 NVS（和凭据同一个命名空间，恢复出厂设置一并清掉），下次从这个
- * 信道开始快速扫描，找到就连，省掉全信道扫描的约 2.5 秒。快速扫描在这个信道上找不到时还会接着扫其他
- * 信道；万一这次没连上，后面的重试改回全信道扫描、按信号挑路由器。
- * Channel hint: once connected, store the router's channel in NVS (the credentials namespace, so a
- * factory reset clears it too). Next time the fast scan starts on that channel and connects on the
- * first match, skipping the ~2.5 s full scan. A fast scan that misses on that channel still moves on
- * to the others; if this attempt fails anyway, later retries go back to a full scan that picks the
- * router by signal.
+ * 记住信道和路由器：连上后把路由器的信道和 BSSID 存进 NVS（和凭据同一个命名空间，恢复出厂设置一并
+ * 清掉），下次只在这个信道上找这一台路由器，找到就连，省掉全信道扫描的约 2.5 秒。只记信道时，快速扫描
+ * 会连上同名网络里先碰到的那一台：2026-11-26 实测同一信道上还有一台远的（-74 dBm，平常 -40 到
+ * -55），连上后握手失败，白等 6 秒。这次没连上的话，后面的重试改回全信道扫描、按信号挑路由器。
+ * Channel and router hint: once connected, store the router's channel and BSSID in NVS (the
+ * credentials namespace, so a factory reset clears it too). Next time only that router is looked for,
+ * on that channel, skipping the ~2.5 s full scan. With the channel alone, the fast scan joined whichever
+ * router of the same name it met first: measured 2026-11-26, a distant one shares the channel (-74 dBm
+ * against the usual -40 to -55); joining it the handshake failed and 6 s were lost. If this attempt
+ * fails, later retries go back to a full scan that picks the router by signal.
  */
 typedef struct {
-    uint8_t version;  ///< 格式版本 1 / format version 1
+    uint8_t version;  ///< 格式版本：1 只有信道，2 加 BSSID / format version: 1 channel only, 2 adds the BSSID
     uint8_t channel;  ///< 1–14
     char ssid[33];    ///< 属于哪个网络 / the network it belongs to
+    uint8_t bssid[6]; ///< 版本 2：上次连的路由器 / version 2: the router last joined
 } transfer_channel_hint_t;
+#define CHANNEL_HINT_V1_SIZE offsetof(transfer_channel_hint_t, bssid)
 static uint8_t s_hint_channel;     ///< 本次用的提示信道，0 为全信道扫描 / hint in use, 0 for a full scan
 static bool s_hint_drop;           ///< 提示信道没连上，下次改全信道 / the hint failed; rescan everything next
 static bool s_hint_checked;        ///< 本次联网已核对过信道 / channel already checked this session
 static int64_t s_wifi_begin_ms;    ///< 开始联网的时刻 / when bring-up began
 static int64_t s_wifi_started_ms;  ///< esp_wifi_start 返回的时刻 / when esp_wifi_start returned
 
-static uint8_t channel_hint_load(const char *ssid) {
+// 读出这个网络的提示；没有就返回 false。旧的版本 1 只有信道，bssid 置零。
+// Read the hint for this network; false if none. An old version 1 has only the channel (bssid zeroed).
+static bool channel_hint_load(const char *ssid, transfer_channel_hint_t *out) {
     nvs_handle_t h;
     transfer_channel_hint_t hint = {0};
     size_t size = sizeof(hint);
-    if (!ssid || !ssid[0] || credentials_open(NVS_READONLY, &h) != ESP_OK) return 0;
+    memset(out, 0, sizeof(*out));
+    if (!ssid || !ssid[0] || credentials_open(NVS_READONLY, &h) != ESP_OK) return false;
     esp_err_t err = nvs_get_blob(h, "chan_hint", &hint, &size);
     nvs_close(h);
-    if (err != ESP_OK || size != sizeof(hint) || hint.version != 1 || hint.channel < 1 || hint.channel > 14) return 0;
+    if (err != ESP_OK || hint.channel < 1 || hint.channel > 14) return false;
+    if (!(hint.version == 1 && size == CHANNEL_HINT_V1_SIZE) && !(hint.version == 2 && size == sizeof(hint))) return false;
+    if (hint.version == 1) memset(hint.bssid, 0, sizeof(hint.bssid));
     hint.ssid[32] = 0;
-    return strcmp(hint.ssid, ssid) ? 0 : hint.channel;
+    if (strcmp(hint.ssid, ssid)) return false;
+    *out = hint;
+    return true;
 }
 
-static void channel_hint_apply(wifi_config_t *wifi, uint8_t channel) {
-    if (!channel) return;
-    wifi->sta.channel = channel;
+static bool hint_has_bssid(const transfer_channel_hint_t *hint) {
+    static const uint8_t zero[6] = {0};
+    return memcmp(hint->bssid, zero, sizeof(zero)) != 0;
+}
+
+// 返回用上的信道（0 为没有提示）。/ Returns the channel in use (0 for no hint).
+static uint8_t channel_hint_apply(wifi_config_t *wifi, const char *ssid) {
+    transfer_channel_hint_t hint;
+    if (!channel_hint_load(ssid, &hint)) return 0;
+    wifi->sta.channel = hint.channel;
     wifi->sta.scan_method = WIFI_FAST_SCAN;
+    if (hint_has_bssid(&hint)) {
+        wifi->sta.bssid_set = true;
+        memcpy(wifi->sta.bssid, hint.bssid, sizeof(hint.bssid));
+    }
+    return hint.channel;
 }
 
-// 已连上：信道变了（或没存过）才写 NVS。在服务轮询里调用，不在事件回调里写闪存。
-// Connected: write NVS only if the channel changed or was never stored. Runs from the service
-// poll, not from an event callback.
+// 已连上：信道或路由器变了（或没存过）才写 NVS。在服务轮询里调用，不在事件回调里写闪存。
+// Connected: write NVS only if the channel or router changed or was never stored. Runs from the
+// service poll, not from an event callback.
 static void channel_hint_check(void) {
     wifi_ap_record_t ap = {0};
     if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK || ap.primary < 1 || ap.primary > 14) return;
     char ssid[33] = {0};
     memcpy(ssid, ap.ssid, 32);
-    if (!ssid[0] || channel_hint_load(ssid) == ap.primary) return;
-    transfer_channel_hint_t hint = {.version = 1, .channel = ap.primary};
+    if (!ssid[0]) return;
+    transfer_channel_hint_t old;
+    if (channel_hint_load(ssid, &old) && old.version == 2 && old.channel == ap.primary &&
+        !memcmp(old.bssid, ap.bssid, sizeof(old.bssid)))
+        return;
+    transfer_channel_hint_t hint = {.version = 2, .channel = ap.primary};
     memcpy(hint.ssid, ssid, sizeof(hint.ssid));
+    memcpy(hint.bssid, ap.bssid, sizeof(hint.bssid));
     nvs_handle_t h;
     esp_err_t err = credentials_open(NVS_READWRITE, &h);
     if (err == ESP_OK) {
@@ -780,7 +809,9 @@ static void channel_hint_check(void) {
         if (err == ESP_OK) err = nvs_commit(h);
         nvs_close(h);
     }
-    ESP_LOGI("transfer", "channel hint saved: channel %u (%s)", (unsigned)ap.primary, esp_err_to_name(err));
+    ESP_LOGI("transfer", "channel hint saved: channel %u, bssid %02x:%02x:%02x:%02x:%02x:%02x (%s)",
+             (unsigned)ap.primary, ap.bssid[0], ap.bssid[1], ap.bssid[2], ap.bssid[3], ap.bssid[4], ap.bssid[5],
+             esp_err_to_name(err));
 }
 
 static void publish_credentials(const transfer_credentials_t *c) {
@@ -979,7 +1010,7 @@ static esp_err_t sync_time_impl(uint32_t *utc_seconds) {
     wifi.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
     wifi.sta.pmf_cfg.capable = true;
     wifi.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
-    channel_hint_apply(&wifi, channel_hint_load(saved.ssid));
+    channel_hint_apply(&wifi, saved.ssid);
     clear_secret(&saved, sizeof(saved));
     s_time_events = xEventGroupCreate();
     if (!s_time_events) { clear_secret(&wifi, sizeof(wifi)); ble_pt_network_release(); return ESP_ERR_NO_MEM; }
@@ -1295,7 +1326,12 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     portEXIT_CRITICAL(&s_lock);
     if (disconnected) {
         const wifi_event_sta_disconnected_t *event = data;
-        ESP_LOGW("transfer", "sta disconnected reason=%u", event ? (unsigned)event->reason : 0);
+        if (event)
+            ESP_LOGW("transfer", "sta disconnected reason=%u bssid %02x:%02x:%02x:%02x:%02x:%02x rssi %d",
+                     (unsigned)event->reason, event->bssid[0], event->bssid[1], event->bssid[2], event->bssid[3],
+                     event->bssid[4], event->bssid[5], event->rssi);
+        else
+            ESP_LOGW("transfer", "sta disconnected reason=0");
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
         ESP_LOGI("transfer", "ap station connected internal free=%u largest=%u",
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
@@ -1394,6 +1430,8 @@ void read_pico_transfer_service_poll(void) {
         wifi_config_t wifi = {0};
         if (esp_wifi_get_config(WIFI_IF_STA, &wifi) == ESP_OK) {
             wifi.sta.channel = 0;
+            wifi.sta.bssid_set = false;
+            memset(wifi.sta.bssid, 0, sizeof(wifi.sta.bssid));
             wifi.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
             wifi.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
             esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &wifi);
@@ -2555,8 +2593,7 @@ esp_err_t read_pico_transfer_start(const read_pico_transfer_cfg_t *cfg) {
         wifi.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
         wifi.sta.pmf_cfg.capable = true;
         wifi.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
-        s_hint_channel = channel_hint_load(saved.ssid);
-        channel_hint_apply(&wifi, s_hint_channel);
+        s_hint_channel = channel_hint_apply(&wifi, saved.ssid);
     }
     err = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL, &s_events);
     if (err != ESP_OK) goto fail;
@@ -3177,7 +3214,12 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     portEXIT_CRITICAL(&s_lock);
     if (disconnected) {
         const wifi_event_sta_disconnected_t *event = data;
-        ESP_LOGW("transfer", "sta disconnected reason=%u", event ? (unsigned)event->reason : 0);
+        if (event)
+            ESP_LOGW("transfer", "sta disconnected reason=%u bssid %02x:%02x:%02x:%02x:%02x:%02x rssi %d",
+                     (unsigned)event->reason, event->bssid[0], event->bssid[1], event->bssid[2], event->bssid[3],
+                     event->bssid[4], event->bssid[5], event->rssi);
+        else
+            ESP_LOGW("transfer", "sta disconnected reason=0");
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
         ESP_LOGI("transfer", "ap station connected internal free=%u largest=%u",
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),

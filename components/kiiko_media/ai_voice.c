@@ -1510,6 +1510,9 @@ static unsigned s_pkt_head;
 static portMUX_TYPE s_pkt_mux = portMUX_INITIALIZER_UNLOCKED;
 static struct netif *s_pkt_netif;
 static netif_input_fn s_pkt_input;
+// 最近一次收到 TCP 包的时间：推上行只在连接后还没收到过回应时做（见 uplink_nudge）。
+// When a TCP packet last arrived: the uplink is pushed only while a connect has had no reply yet.
+static volatile int64_t s_tcp_in_us;
 static netif_linkoutput_fn s_pkt_output;
 static int64_t s_pkt_t0;
 
@@ -1523,6 +1526,7 @@ static void pkt_note(struct pbuf *p, bool out, err_t err) {
     if ((proto != 6 && proto != 1) || p->len < 14 + ihl + (proto == 6 ? 20u : 4u)) return;
     const uint8_t *l4 = ip + ihl;
     pkt_t r = {.us = esp_timer_get_time(), .out = out, .proto = proto, .err = (int8_t)err};
+    if (!out && proto == 6) s_tcp_in_us = r.us;
     memcpy(&r.peer, out ? ip + 16 : ip + 12, 4);
     const unsigned total = (unsigned)ip[2] << 8 | ip[3];
     if (proto == 6) {
@@ -2034,6 +2038,67 @@ static void warm_release(const char *why) {
     log_flush();
 }
 
+/*
+ * 预热时先打通上行，再向 AI 服务器建一次 TCP 连接。实测（2026-11-26）：拿到地址后只等不发，8 秒内连接
+ * 请求一个回应都没有；随后会话推了一次上行（见 uplink_nudge），重发的请求 80 ms 就有了回应。所以卡住的
+ * 不是时间，而是要先发出一批包。这里先推一次，没连上就每秒再推，连通即复位关闭，不占名额。最多等
+ * 8 秒，取消或离开页面立刻停。
+ * Open the uplink during warm-up, then make one TCP connection to the AI host. Measured (2026-11-26):
+ * waiting without sending, not one connection request was answered in 8 s; the session then pushed
+ * the uplink (see uplink_nudge) and the retransmitted request was answered 80 ms later. So the stall is
+ * not a matter of time; a batch of packets has to go out first. Push once here, again each second
+ * until connected; once through, the connection is reset so it holds no slot. At most 8 s, stopping at
+ * once on cancel or when the page closes.
+ */
+#define PRECONNECT_MAX_MS 8000
+
+static void tcp_preconnect(void) {
+    const int64_t t0 = esp_timer_get_time();
+    s_connect_us = t0;
+    uplink_nudge();
+    int64_t nudged = esp_timer_get_time();
+    const struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(RT_HOST, "443", &hints, &res) != 0 || !res) {
+        ai_log("warm: tcp pre-connect skipped (dns failed)");
+        return;
+    }
+    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { freeaddrinfo(res); return; }
+    const struct linger lg = {.l_onoff = 1, .l_linger = 0};
+    setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+    int r = connect(fd, res->ai_addr, res->ai_addrlen);
+    freeaddrinfo(res);
+    const char *how = "failed";
+    if (r == 0) {
+        how = "connected";
+    } else if (errno == EINPROGRESS) {
+        // 分段等，好及时响应取消和离开页面。/ Wait in slices so cancel and page close take effect promptly.
+        while (!s_cancel && atomic_load(&s_page_open) && (esp_timer_get_time() - t0) / 1000 < PRECONNECT_MAX_MS) {
+            fd_set wr;
+            FD_ZERO(&wr);
+            FD_SET(fd, &wr);
+            struct timeval wait = {.tv_sec = 0, .tv_usec = 200 * 1000};
+            if (select(fd + 1, NULL, &wr, NULL, &wait) != 1) {
+                if (esp_timer_get_time() - nudged > 1000000) {
+                    uplink_nudge();
+                    nudged = esp_timer_get_time();
+                }
+                continue;
+            }
+            int soerr = -1;
+            socklen_t len = sizeof(soerr);
+            how = getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len) == 0 && soerr == 0 ? "connected" : "failed";
+            break;
+        }
+        if (!strcmp(how, "failed") && (s_cancel || !atomic_load(&s_page_open))) how = "stopped";
+        else if (!strcmp(how, "failed") && (esp_timer_get_time() - t0) / 1000 >= PRECONNECT_MAX_MS) how = "timed out";
+    }
+    close(fd);
+    ai_log("warm: tcp pre-connect %s after %d ms", how, (int)((esp_timer_get_time() - t0) / 1000));
+}
+
 static void warm_up(void) {
     if (!atomic_load(&s_page_open) || atomic_load(&s_session) || atomic_load(&s_warm)) return;
     if (!RT_API_KEY[0] || music_active()) return;
@@ -2056,6 +2121,11 @@ static void warm_up(void) {
     if (ok) ai_log("warm: wifi + i2s ready; audio %d ms, wifi %d ms", (int)((t_i2s - t0) / 1000),
                    (int)((esp_timer_get_time() - t_i2s) / 1000));
     else ai_log("warm: wifi not ready yet (%s)", s_cancel ? "cancelled" : err);
+    if (ok) {
+        ctl_step("warm: tcp");
+        tcp_preconnect();
+        s_warm_until_us = esp_timer_get_time() + (int64_t)WARM_HOLD_MS * 1000;
+    }
     // 离开了页面就收回；还在页面上就留着，点开始时会接着等 WiFi。
     // Page left: release. Still on the page: keep everything; start will keep waiting for WiFi.
     if (!atomic_load(&s_page_open)) warm_release("page closed");
@@ -2273,8 +2343,12 @@ static void ctl_task(void *arg) {
         check_rx_stall();
         s_ctl_step = NULL;
         if (atomic_load(&s_session)) mem_sample();
-        // 连接还没完成：每秒推一次上行（见 uplink_nudge）。/ Not connected yet: push the uplink each second (see uplink_nudge).
-        if (atomic_load(&s_session) && s_ws && !atomic_load(&s_ws_connected) &&
+        // 连接还没完成、服务器也还没回过包：每秒推一次上行（见 uplink_nudge）。已经有回应就不推，2026-11-26
+        // 实测在 TLS 握手中途推会占满发送缓冲，ACK 发不出去。
+        // Not connected and no reply from the server yet: push the uplink each second (see uplink_nudge).
+        // Once replies arrive, no push: measured 2026-11-26, a push mid-TLS-handshake filled the send
+        // buffers and ACKs failed to go out.
+        if (atomic_load(&s_session) && s_ws && !atomic_load(&s_ws_connected) && s_tcp_in_us < s_connect_us &&
             esp_timer_get_time() - s_connect_us > 1000000 && esp_timer_get_time() - s_nudge_us > 1000000) {
             ctl_step("uplink nudge");
             uplink_nudge();
