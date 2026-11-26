@@ -143,6 +143,11 @@ bool book_store_flash_ready(void) {
     return s_wl != WL_INVALID_HANDLE;
 }
 
+esp_err_t book_store_flash_mount(void) {
+    book_store_root_t root;
+    return book_store_flash_ready() ? ESP_OK : flash_root(&root);
+}
+
 esp_err_t book_store_delete(const char* path, bool* removed) {
     if (!removed) return ESP_ERR_INVALID_ARG;
     *removed = false;

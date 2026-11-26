@@ -24,7 +24,7 @@ for n in range(len(index)-1):
    if ((record[5+bit//2]>>((bit%2)*4))&15)>=6:old[5+bit//8]|=1<<(bit%8)
   mono.extend(old)
 assert hashlib.sha256(mono).hexdigest()=='c9ab41911c03df18540b84ed6aee9121022f59f758d3b5ae3b288005218c97b3'
-covered=font_codepoints(native)|set(chars);assert len(covered)==7668
+covered=font_codepoints(native)|set(chars);assert len(covered)==7698  # 含背单词用的 30 个音标 / includes 30 IPA glyphs for vocab
 common={int(line.split('#',1)[0].strip(),16) for line in (source/'tools/fixtures/reader-common-6500.txt').read_text().splitlines() if line.split('#',1)[0].strip()};assert common<=covered
 for name in ['reader_missing_advance','ttf_text_left_bearing_px']:
  assert function(name,source/'main/font/ttf_font.c')==function(name,source/'boards/pico/src/main/font/ttf_font.c'),name
@@ -48,4 +48,4 @@ with tempfile.TemporaryDirectory() as folder:
  p=Path(folder);(p/'test.c').write_text(unit)
  subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',str(p/'test.c'),'-o',str(p/'test')],check=True)
  subprocess.run([str(p/'test')],check=True)
-print('PASS: S31/Pico identical PIF4 and native face;7668 characters/all common6500; all6030 legacy UI glyph pixels/metrics unchanged; exact advances/bearings shared')
+print('PASS: S31/Pico identical PIF4 and native face;7698 characters/all common6500; all6030 legacy UI glyph pixels/metrics unchanged; exact advances/bearings shared')

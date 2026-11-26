@@ -100,6 +100,7 @@ kiiko_board_sources(kiiko_selected_sources "${CMAKE_CURRENT_LIST_DIR}" "app_main
         "apps/app_apps.c"
         "apps/app_music.c"
         "apps/app_vocab.c"
+        "apps/vocab_book.c"
         "apps/app_ai.c"
         "apps/book_toc.c"
         "apps/app_dashboard.c"
@@ -161,6 +162,7 @@ idf_component_register(
         "assets/builtin.ttf"
         "assets/ui-hanzi.bin"
         "assets/display-test.png"
+        "assets/vocab.bin"
 )
 
 # 包住 IDF 的 panic 处理器：崩溃现场在重启前落进 RTC，没有串口时那是唯一的现场。
