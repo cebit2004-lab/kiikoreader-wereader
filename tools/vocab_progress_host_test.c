@@ -211,7 +211,16 @@ static void test_round_trip(const blob_t *a) {
     open_book(a);
     assert(!memcmp(saved, s_prog, sizeof(*s_prog) * s_head->words));
     assert(s_last_day == D && s_daily.new_today == 2 && s_dir == VOCAB_DIR_ZH_EN && s_scope.count == 1 && !s_dirty);
-    puts("ok  fresh save/load round trip, touched-only records");
+    // 自动发音默认开，关掉后随进度保存。/ Auto pronunciation defaults on; turning it off is saved with progress.
+    assert(vocab_auto_speak());
+    vocab_set_auto_speak(false);
+    assert(!s_dirty);
+    open_book(a);
+    assert(!vocab_auto_speak() && s_dir == VOCAB_DIR_ZH_EN);
+    vocab_set_auto_speak(true);
+    open_book(a);
+    assert(vocab_auto_speak());
+    puts("ok  fresh save/load round trip, touched-only records, auto pronunciation flag");
 }
 
 static void test_bak_rotation_and_recovery(const blob_t *a) {
@@ -285,7 +294,7 @@ static void test_vpr4_migration(const blob_t *a) {
     write_vpr4(DAT, s_sig);
     open_book(a);
     assert(!memcmp(saved, s_prog, sizeof(*s_prog) * s_head->words));
-    assert(s_daily.daily_new == 10 && s_daily.streak == 7 && s_dirty);
+    assert(s_daily.daily_new == 10 && s_daily.streak == 7 && s_dirty && vocab_auto_speak());
     vocab_save();
     assert(magic_of(DAT) == '5' && fsize(DAT) == vpr5_size(2));
     open_book(a);

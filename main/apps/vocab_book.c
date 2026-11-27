@@ -56,12 +56,14 @@ typedef struct __attribute__((packed)) { uint8_t level, seen, wrong, streak; uin
 typedef struct __attribute__((packed)) { uint8_t level, seen; uint16_t due; } vocab_progress_v1_t;
 // 头部之后的每日状态。/ Daily state after the header.
 typedef struct __attribute__((packed)) {
-    uint8_t dir, daily_new, review_done, pad;
+    uint8_t dir, daily_new, review_done;
+    uint8_t flags;         // 原为补位，旧文件都是 0 / was padding, 0 in older files
     uint16_t stat_day, new_today, streak, study_day;
     uint32_t last_learn;   // 最近一次学新词或答错的时间（Unix 秒）/ last new or missed answer, Unix seconds
 } daily_t;
 static const uint8_t k_daily_options[] = {5, 8, 10, 15};
 #define DAILY_DEFAULT 8
+#define FLAG_NO_AUTO_SPEAK 0x01   // 关掉自动发音 / auto pronunciation off
 #define REVIEW_WAIT_S (20 * 60)
 #define EVENING_HOUR 19
 // 进度文件 VPR5：头、每日状态、u16 条数，之后只有学过的词，每条是词头哈希加进度。读的时候按哈希逐词对回
@@ -532,6 +534,14 @@ vocab_dir_t vocab_dir(void) { return s_dir; }
 void vocab_set_dir(vocab_dir_t dir) {
     if (dir == s_dir || dir > VOCAB_DIR_ZH_EN) return;
     s_dir = dir;
+    s_dirty = true;
+    vocab_save();
+}
+
+bool vocab_auto_speak(void) { return !(s_daily.flags & FLAG_NO_AUTO_SPEAK); }
+void vocab_set_auto_speak(bool on) {
+    if (on == vocab_auto_speak()) return;
+    s_daily.flags = (uint8_t)(on ? s_daily.flags & ~FLAG_NO_AUTO_SPEAK : s_daily.flags | FLAG_NO_AUTO_SPEAK);
     s_dirty = true;
     vocab_save();
 }

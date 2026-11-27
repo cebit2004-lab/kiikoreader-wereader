@@ -69,6 +69,10 @@ void vocab_scope_stats(vocab_scope_t scope, vocab_stats_t *out);
 vocab_dir_t vocab_dir(void);
 void vocab_set_dir(vocab_dir_t dir);
 
+/// 出题和讲解时自动读单词（默认开），随进度保存。/ Read words aloud automatically (on by default), saved with progress.
+bool vocab_auto_speak(void);
+void vocab_set_auto_speak(bool on);
+
 /// 每日新词量（5/8/10/15，默认 8）与今天已学新词数、连续打卡天数。
 /// Daily new-word quota (5/8/10/15, default 8), new words learned today and the study streak in days.
 int vocab_daily_new(void);

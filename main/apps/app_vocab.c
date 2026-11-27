@@ -7,6 +7,8 @@
  *   答题：一选四。选完不论对错都进讲解页：音标、词性释义、词形变化（复数、过去式、比较级、宾格、
  *   派生的形容词/副词/名词等）和中英例句。答错或「不知道」的词进错词本，本轮稍后再出一次；
  *   错词连续答对 3 次自动移出。防遗忘：全部词库里按记忆曲线今天到期的词。中键返回，长按中键全刷。
+ *   发音：卡上 /sdcard/vocab_audio 有 tools/gen_vocab_audio.py 生成的 MP3 时，单词和例句旁出喇叭，点读；
+ *   看英文出题时自动读一遍（看中文出题则答完再读），答题页底部可关自动发音，音量键重读。
  * English: Vocabulary page. Built-in PEP primary (grades 3-6, by term and unit), junior-high
  *   zhongkao words and the 2000 most common words. Home holds the current list card, the quiz
  *   direction, the wrong-word book and anti-forgetting entries, and scope pickers by stage.
@@ -14,18 +16,25 @@
  *   word forms and an English–Chinese example. Missed words go to the wrong-word book and return
  *   later in the round; three right answers in a row clear them. Anti-forgetting reviews every word
  *   due today. The middle key goes back; holding it forces a full refresh.
+ *   Pronunciation: when /sdcard/vocab_audio holds the MP3s from tools/gen_vocab_audio.py, words and
+ *   examples get a speaker and play on tap; English-side questions are read aloud as they appear
+ *   (Chinese-side ones after the answer). The quiz page can turn auto reading off; volume keys replay.
  */
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "app.h"
 #include "app_registry.h"
 #include "esp_random.h"
+#include "sd_recovery.h"
 #include "ui_gesture.h"
 #include "ui_kit.h"
 #include "ui_menu.h"
 #include "ui_nav.h"
 #include "vocab_book.h"
+#include "word_voice.h"
 
 typedef enum { VIEW_HOME, VIEW_BOOK, VIEW_QUIZ, VIEW_RESULT, VIEW_DONE, VIEW_WRONG, VIEW_DETAIL } view_t;
 
@@ -56,6 +65,10 @@ typedef enum { VIEW_HOME, VIEW_BOOK, VIEW_QUIZ, VIEW_RESULT, VIEW_DONE, VIEW_WRO
 #define NEXT_BTN ((EpdRect){X0, 1092, W, 96})
 #define LEFT_BTN ((EpdRect){X0, 1092, 300, 96})
 #define RIGHT_BTN ((EpdRect){X0 + 312, 1092, 300, 96})
+#define QUIZ_WORD ((EpdRect){X0, 230, W, 184})            // 题干单词与音标，点了读 / question word and phonetics, tap to hear
+#define QUIZ_SPEAKER ((EpdRect){X0 + W - 72, 250, 72, 80})
+#define AUTO_CHIP ((EpdRect){X0 + W - 260, 1100, 260, 64})
+#define AUDIO_DIR "/sdcard/vocab_audio"
 
 extern const app_desc_t *g_apps_origin;
 static view_t s_view;
@@ -66,6 +79,63 @@ static bool s_zh_en;
 static int s_shown_id;              // 讲解页的词 / word on the explanation page
 static uint16_t s_wrong_ids[512];
 static int s_wrong_count;
+// 发音：卡上有没有音频、下次刷完屏要读的（-1 无）、讲解页单词与例句的点读区。
+// Pronunciation: audio on the card, what to read after the next refresh (-1 none), explanation tap areas.
+static bool s_have_audio;
+static int s_speak_id = -1;
+static bool s_speak_example;
+static EpdRect s_word_hit, s_example_hit;
+
+// ---------------------------------------------------------------- pronunciation
+
+// 文件名：词头小写，字母数字以外换成下划线（gen_vocab_audio.py 同样算，并检查不撞名）。
+// File name: the headword lower-cased with anything but letters and digits as '_' (gen_vocab_audio.py
+// computes the same and checks for clashes).
+static bool audio_path(int id, bool example, char *out, int size) {
+    vocab_word_t w;
+    if (!vocab_word(id, &w) || !w.en[0]) return false;
+    char key[64];
+    int n = 0;
+    for (const char *p = w.en; *p && n < (int)sizeof(key) - 1; ++p) {
+        const char c = (char)((*p >= 'A' && *p <= 'Z') ? *p - 'A' + 'a' : *p);
+        key[n++] = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ? c : '_';
+    }
+    key[n] = 0;
+    snprintf(out, size, AUDIO_DIR "/%c/%s.mp3", example ? 's' : 'w', key);
+    return true;
+}
+
+static void speak(int id, bool example) {
+    char path[96];
+    if (s_have_audio && id >= 0 && audio_path(id, example, path, sizeof(path))) (void)word_voice_play(path);
+}
+
+// 刷完屏再读：刷屏时出声会有破音。/ Read after the refresh: sound during a refresh crackles.
+static void speak_later(int id, bool example) {
+    if (!s_have_audio) return;
+    s_speak_id = id;
+    s_speak_example = example;
+}
+
+static void auto_speak(int id) { if (vocab_auto_speak()) speak_later(id, false); }
+
+// 喇叭：方块加喇叭口，右边两道声波。/ Speaker: a box and a cone with two sound waves on the right.
+static void draw_speaker(uint8_t *fb, int cx, int cy, int s, uint8_t color) {
+    const int bx = cx - s / 2, bw = s / 4, bh = s * 2 / 5;
+    epd_fill_rect((EpdRect){bx, cy - bh / 2, bw, bh}, color, fb);
+    const int x0 = bx + bw - 1, x1 = cx + s / 20, top = cy - s * 9 / 20, bot = cy + s * 9 / 20;
+    epd_fill_triangle(x0, cy - bh / 2, x1, top, x1, bot, color, fb);
+    epd_fill_triangle(x0, cy - bh / 2, x0, cy + bh / 2, x1, bot, color, fb);
+    const int th = s / 14 > 2 ? s / 14 : 2;
+    for (int wave = 1; wave <= 2; ++wave) {
+        const int r = s * (wave == 1 ? 22 : 40) / 100;
+        for (int a = -45; a <= 45; ++a) {
+            const float rad = (float)a * 3.14159265f / 180.0f;
+            for (int t = 0; t < th; ++t)
+                epd_draw_pixel(x1 + (int)lroundf((r + t) * cosf(rad)), cy + (int)lroundf((r + t) * sinf(rad)), color, fb);
+        }
+    }
+}
 
 static void go_back(app_ctx_t *ctx) {
     vocab_save();
@@ -416,6 +486,8 @@ static void next_question(void) {
     const vocab_dir_t dir = vocab_dir();
     s_zh_en = dir == VOCAB_DIR_ZH_EN || (dir == VOCAB_DIR_MIXED && (esp_random() & 1u));
     s_view = VIEW_QUIZ;
+    // 看中文出题时读出来就泄了答案，等答完再读。/ Reading a Chinese-side question would give the answer away.
+    if (!s_zh_en) auto_speak(id);
 }
 
 static void progress_label(uint8_t *fb) {
@@ -444,7 +516,10 @@ static void render_quiz(uint8_t *fb) {
         vocab_pos_name(w.pos, pos, sizeof(pos));
         if (pos[0]) ui_text_box(fb, (EpdRect){X0, 364, W, 40}, 26, pos, EPD_DRAW_ALIGN_CENTER, false);
     } else {
-        ui_text_box(fb, (EpdRect){X0, 230, W, 120}, 72, w.en, EPD_DRAW_ALIGN_CENTER, false);
+        // 有喇叭时两边各让出喇叭宽，单词仍居中。/ With a speaker, both sides give up its width so the word stays centred.
+        const int pad = s_have_audio ? QUIZ_SPEAKER.width : 0;
+        ui_text_box(fb, (EpdRect){X0 + pad, 230, W - 2 * pad, 120}, 72, w.en, EPD_DRAW_ALIGN_CENTER, false);
+        if (s_have_audio) draw_speaker(fb, QUIZ_SPEAKER.x + QUIZ_SPEAKER.width / 2, QUIZ_SPEAKER.y + QUIZ_SPEAKER.height / 2, 48, 0x00);
         if (w.ipa[0]) {
             snprintf(line, sizeof(line), "/%s/", w.ipa);
             ui_text_box(fb, (EpdRect){X0, 362, W, 52}, 32, line, EPD_DRAW_ALIGN_CENTER, false);
@@ -462,6 +537,7 @@ static void render_quiz(uint8_t *fb) {
         ui_text_box(fb, (EpdRect){r.x + 72, r.y + 14, r.width - 96, r.height - 28}, 34, line, EPD_DRAW_ALIGN_LEFT, false);
     }
     ui_draw_button(fb, IDK_BTN, "不知道", false);
+    if (s_have_audio) chip(fb, AUTO_CHIP, vocab_auto_speak() ? "自动发音：开" : "自动发音：关", vocab_auto_speak(), 22);
 }
 
 static app_redraw_t pick(int slot) {
@@ -471,6 +547,7 @@ static app_redraw_t pick(int slot) {
     s_shown_id = id;
     vocab_round_answer(slot == s_right ? VOCAB_KNOWN : VOCAB_FORGOT);
     s_view = VIEW_RESULT;
+    if (s_zh_en) auto_speak(id);   // 看中文出的题，答完读给你听 / Chinese-side question: read it now
     return APP_REDRAW_PAGE;
 }
 
@@ -478,6 +555,11 @@ static app_redraw_t quiz_tap(int x, int y) {
     for (int i = 0; i < 4; ++i)
         if (ui_rect_hit(option_rect(i), x, y)) return pick(i);
     if (ui_rect_hit(IDK_BTN, x, y)) return pick(-1);
+    if (s_have_audio && ui_rect_hit(AUTO_CHIP, x, y)) {
+        vocab_set_auto_speak(!vocab_auto_speak());
+        return APP_REDRAW_PAGE;
+    }
+    if (s_have_audio && !s_zh_en && ui_rect_hit(QUIZ_WORD, x, y)) speak(vocab_round_word(), false);
     return APP_REDRAW_NONE;
 }
 
@@ -503,22 +585,28 @@ static int render_word_body(uint8_t *fb, int id, int y) {
     vocab_word_t w;
     if (!vocab_word(id, &w)) return y;
     char line[160], pos[48];
-    // 单词和音标放得下就同一行，给下面的大字腾地方。/ Word and phonetics share a line when they fit.
+    const int word_top = y;
+    // 单词和音标放得下就同一行，给下面的大字腾地方；有发音时末尾跟一个喇叭。
+    // Word and phonetics share a line when they fit; with audio a speaker follows them.
     snprintf(line, sizeof(line), "/%s/", w.ipa);
+    const int sp = s_have_audio ? 64 : 0;
     const int ww = ui_text_fixed_width_px(66, w.en), iw = w.ipa[0] ? ui_text_fixed_width_px(34, line) : 0;
-    if (ww + iw + 28 <= W) {
-        const int x = X0 + (W - ww - iw - (iw ? 28 : 0)) / 2;
+    if (ww + iw + 28 + sp <= W) {
+        const int x = X0 + (W - ww - iw - (iw ? 28 : 0) - sp) / 2;
         ui_text_fixed_vc(fb, x, y + 46, 66, w.en, EPD_DRAW_ALIGN_LEFT, false);
         if (iw) ui_text_fixed_vc(fb, x + ww + 28, y + 50, 34, line, EPD_DRAW_ALIGN_LEFT, false);
+        if (sp) draw_speaker(fb, x + ww + iw + (iw ? 28 : 0) + 40, y + 48, 40, 0x00);
         y += 96;
     } else {
-        ui_text_box(fb, (EpdRect){X0, y, W, 92}, 66, w.en, EPD_DRAW_ALIGN_CENTER, false);
+        ui_text_box(fb, (EpdRect){X0 + sp, y, W - 2 * sp, 92}, 66, w.en, EPD_DRAW_ALIGN_CENTER, false);
+        if (sp) draw_speaker(fb, X0 + W - sp / 2, y + 46, 40, 0x00);
         y += 92;
         if (w.ipa[0]) {
             ui_text_box(fb, (EpdRect){X0, y, W, 52}, 34, line, EPD_DRAW_ALIGN_CENTER, false);
             y += 56;
         }
     }
+    s_word_hit = (EpdRect){X0, word_top, W, y - word_top};
     vocab_pos_name(w.pos, pos, sizeof(pos));
     caption(fb, y, pos[0] ? pos : "释义");
     y = wrap(fb, X0 + 4, y + CAPTION_H, W - 8, 42, w.zh, fit_lines(y + CAPTION_H, 42, 2)) + 6;
@@ -527,9 +615,13 @@ static int render_word_body(uint8_t *fb, int id, int y) {
         y = wrap(fb, X0 + 4, y + CAPTION_H, W - 8, 42, w.forms, fit_lines(y + CAPTION_H, 42, 2)) + 6;   // 两行，给例句留地方 / two lines, leaving room for the example
     }
     caption(fb, y, "例句");
+    s_example_hit = (EpdRect){0, 0, 0, 0};
     if (w.ex_en[0]) {
+        const int ex_top = y;
+        if (s_have_audio) draw_speaker(fb, X0 + W - 28, y + 26, 36, 0x00);
         y = wrap(fb, X0 + 4, y + CAPTION_H, W - 8, 42, w.ex_en, fit_lines(y + CAPTION_H, 42, 3));
         y = wrap(fb, X0 + 4, y + 2, W - 8, 42, w.ex_zh, fit_lines(y + 2, 42, 2));
+        s_example_hit = (EpdRect){X0, ex_top, W, y - ex_top};
     } else {
         y = wrap(fb, X0 + 4, y + CAPTION_H, W - 8, 42, "这个词暂时没有例句", 1);
     }
@@ -620,7 +712,16 @@ static app_redraw_t wrong_tap(int x, int y) {
     if (index >= s_wrong_count) return APP_REDRAW_NONE;
     s_shown_id = s_wrong_ids[index];
     s_view = VIEW_DETAIL;
+    auto_speak(s_shown_id);
     return APP_REDRAW_PAGE;
+}
+
+// 讲解页点单词读单词，点例句读例句。/ On an explanation, tapping the word or the example reads it.
+static app_redraw_t word_body_tap(int x, int y) {
+    if (!s_have_audio) return APP_REDRAW_NONE;
+    if (ui_rect_hit(s_word_hit, x, y)) speak(s_shown_id, false);
+    else if (s_example_hit.width && ui_rect_hit(s_example_hit, x, y)) speak(s_shown_id, true);
+    return APP_REDRAW_NONE;
 }
 
 static app_redraw_t detail_tap(int x, int y) {
@@ -632,7 +733,7 @@ static app_redraw_t detail_tap(int x, int y) {
         return APP_REDRAW_PAGE;
     }
     if (ui_rect_hit(RIGHT_BTN, x, y)) { s_view = VIEW_WRONG; return APP_REDRAW_PAGE; }
-    return APP_REDRAW_NONE;
+    return word_body_tap(x, y);
 }
 
 // ---------------------------------------------------------------- done
@@ -723,7 +824,9 @@ static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
     switch (s_view) {
     case VIEW_BOOK: return book_tap(x, y);
     case VIEW_QUIZ: return quiz_tap(x, y);
-    case VIEW_RESULT: return ui_rect_hit(NEXT_BTN, x, y) ? result_next() : APP_REDRAW_NONE;
+    case VIEW_RESULT:
+        if (ui_rect_hit(NEXT_BTN, x, y)) return result_next();
+        return word_body_tap(x, y);
     case VIEW_DONE: return done_tap(x, y);
     case VIEW_WRONG: return wrong_tap(x, y);
     case VIEW_DETAIL: return detail_tap(x, y);
@@ -735,6 +838,9 @@ static app_redraw_t on_key(app_ctx_t *ctx, int key) {
     if (key == UI_KEY_1 || key == UI_KEY_3) {
         // 讲解页：音量键都是「下一个」。列表页：翻页。/ Explanation: either volume key goes next. Lists: page.
         if (s_view == VIEW_RESULT) return result_next();
+        // 答题页（看英文）和错词讲解：音量键重读。/ English-side question and wrong-word detail: volume keys replay.
+        if (s_view == VIEW_QUIZ && !s_zh_en) { speak(vocab_round_word(), false); return APP_REDRAW_NONE; }
+        if (s_view == VIEW_DETAIL) { speak(s_shown_id, false); return APP_REDRAW_NONE; }
         const int pages = s_view == VIEW_BOOK ? book_pages() : s_view == VIEW_WRONG ? wrong_pages() : 0;
         if (pages > 1) {
             const int target = s_page + (key == UI_KEY_3 ? 1 : -1);
@@ -750,9 +856,25 @@ static app_redraw_t on_key_long(app_ctx_t *ctx, int key) {
     return key == UI_KEY_2 ? APP_REDRAW_FULL : APP_REDRAW_NONE;
 }
 
+// 页面刷完后的下一拍读等着的那段。/ The tick after a refresh reads whatever is waiting.
+static app_redraw_t on_tick(app_ctx_t *ctx) {
+    (void)ctx;
+    // 卡在修复时不碰文件。/ Leave the card alone while it is being recovered.
+    if (s_speak_id >= 0 && !app_sd_recovery_busy()) {
+        const int id = s_speak_id;
+        s_speak_id = -1;
+        speak(id, s_speak_example);
+    }
+    return APP_REDRAW_NONE;
+}
+
 static void on_enter(app_ctx_t *ctx) {
     (void)ctx;
     s_view = VIEW_HOME;
+    s_speak_id = -1;
+    struct stat st;
+    s_have_audio = stat(AUDIO_DIR "/w", &st) == 0 && S_ISDIR(st.st_mode);
+    if (s_have_audio) word_voice_prepare();
     s_stage = 0;
     // 打开时停在当前词表所在的阶段。/ Open on the stage holding the current list.
     if (vocab_open()) {
@@ -764,8 +886,18 @@ static void on_enter(app_ctx_t *ctx) {
     }
 }
 
-static void vocab_exit(app_ctx_t *ctx) { (void)ctx; vocab_save(); }
-static void on_before_lock(app_ctx_t *ctx) { (void)ctx; vocab_save(); }
+static void vocab_exit(app_ctx_t *ctx) {
+    (void)ctx;
+    s_speak_id = -1;
+    word_voice_stop();
+    vocab_save();
+}
+static void on_before_lock(app_ctx_t *ctx) {
+    (void)ctx;
+    s_speak_id = -1;
+    word_voice_stop();
+    vocab_save();
+}
 
 /// 「应用」页卡片上的两行摘要。/ Two summary lines for the Apps card.
 void app_vocab_summary(char *line1, int size1, char *line2, int size2) {
@@ -795,4 +927,5 @@ const app_desc_t app_vocab = {
     .on_gesture = on_gesture,
     .on_key = on_key,
     .on_key_long = on_key_long,
+    .on_tick = on_tick,
 };

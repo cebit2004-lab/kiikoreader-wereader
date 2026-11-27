@@ -48,6 +48,7 @@ typedef enum {
     METALIO_AUDIO_OWNER_MUSIC,
     METALIO_AUDIO_OWNER_AI,
     METALIO_AUDIO_OWNER_SELFTEST,
+    METALIO_AUDIO_OWNER_VOICE,      // 背单词发音 / vocabulary pronunciation
 } metalio_audio_owner_t;
 
 /// 以 owner 的名义占用并打开 I2S（单声道样本）。别人占着时最多等 wait_ms 让它放手（等的是放手通知，不轮询），
