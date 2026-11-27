@@ -975,8 +975,9 @@ void app_loop_run(const app_loop_config_t* config) {
     rp_boot_mark("frame");
     pico_boot_ready();
     ESP_LOGI(TAG, "UI ready on %s", current->title);
-    // 上次崩溃的现场（异常类型与触发地址）：有的话打一遍，串口和屏幕各有一份。
-    // The previous panic scene, when there was one: logged here, and shown on the home screen.
+    // 上次崩溃的现场：有的话打到串口、追加到卡上的 crash_log.txt，写成后清除。
+    // The previous panic scene, when there was one: logged and appended to crash_log.txt on the card,
+    // then cleared once written.
     crash_note_log();
 #ifdef KIIKO_LOCAL_LATENCY
     local_latency_init();

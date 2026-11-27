@@ -2,24 +2,30 @@
  * SPDX-FileCopyrightText: 2026 mindreset
  * SPDX-License-Identifier: Apache-2.0
  *
- * 中文：崩溃现场。panic 时把异常类型、触发地址与描述写进 RTC 内存，下一次开机由首页显示
- * 并由串口打一遍。这台设备没有随手可用的串口，崩溃原因没有别的地方可以留。
- * 写记录只用整数赋值：panic 上下文里不能指望 printf 或分配。
+ * 中文：崩溃现场。panic 时把异常类型、触发地址、描述和出事固件的 ELF 摘要写进 RTC 内存；下一次开机
+ * 打到串口并追加到 TF 卡上的 crash_log.txt，写成后清除。这台设备没有随手可用的串口，卡上的文件才是
+ * 用户拿得到的记录；带上摘要才知道该拿哪个 ELF 去解析地址。写记录只用整数赋值：panic 上下文里不能指望
+ * printf 或分配。
  *
- * English: The panic scene. On a panic the exception type, faulting address and description go
- * into RTC memory, and the next boot shows them on the home screen and logs them once. This board
- * has no convenient console, and a crash has nowhere else to be remembered. Only integer
- * assignments happen here: the panic context cannot rely on printf or allocation.
+ * English: The panic scene. On a panic the exception type, faulting address, description and the ELF
+ * digest of the running build go into RTC memory; the next boot logs them and appends them to
+ * crash_log.txt on the card, then clears them once written. This board has no convenient console, so
+ * the file on the card is the record a user can reach, and the digest tells which ELF resolves the
+ * addresses. Only integer assignments happen here: the panic context cannot rely on printf or allocation.
  */
 
 #include "crash_note.h"
 
 #include <stdio.h>
+#include <string.h>
+#include <time.h>
 
+#include "esp_app_desc.h"
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_memory_utils.h"
 #include "esp_private/panic_internal.h"
+#include "esp_system.h"
 #include "riscv/rvruntime-frames.h"
 
 static const char *TAG = "crash";
@@ -29,7 +35,7 @@ static const char *TAG = "crash";
 typedef struct {
     uint32_t magic;
     uint32_t addr;         // 触发异常的指令地址 / instruction address that faulted
-    uint32_t description;  // 描述字符串，在 flash 里，重启后仍有效 / description string, in flash
+    uint32_t description;  // 描述字符串，在出事那版的 flash 里 / description string, in the crashing build's flash
     uint32_t exception;
     uint32_t core;
     // abort()/assert 的原因文字（含调用方地址或文件行号）。它在 RAM 里，重启后就没了，所以抄一份。
@@ -41,10 +47,22 @@ typedef struct {
     // without frame pointers, to be resolved against the ELF with addr2line.
     uint32_t ra;
     uint32_t stack_pc[8];
+    // 出事那版固件 ELF 摘要的前 8 字节（开机日志 "ELF file SHA256" 的开头）。
+    // The first 8 bytes of the crashing build's ELF digest (the start of the boot log's "ELF file SHA256").
+    uint8_t build[8];
 } crash_note_t;
 
-#define CRASH_NOTE_MAGIC 0x434E4F54u  // "CNOT"
+// 布局改过就换 magic：旧布局的记录不再当真。/ A new magic for each layout change: old-layout records are ignored.
+#define CRASH_NOTE_MAGIC 0x434E4F32u  // "CNO2"
+#define CRASH_LOG_PATH "/sdcard/crash_log.txt"
 RTC_NOINIT_ATTR static crash_note_t s_note;
+// 本版摘要，开机时抄进内部 RAM：panic 时可能读不了 flash。
+// This build's digest, copied into internal RAM at startup: flash may be unreadable during a panic.
+static uint8_t s_build[8];
+
+__attribute__((constructor)) static void capture_build(void) {
+    memcpy(s_build, esp_app_get_description()->app_elf_sha256, sizeof(s_build));
+}
 
 // 链接器由 --wrap 提供：指向被包住的那个原始实现。
 // Provided by the linker through --wrap: the original implementation being wrapped.
@@ -58,6 +76,7 @@ void __wrap_esp_panic_handler(panic_info_t *info) {
         s_note.description = (uint32_t)(uintptr_t)info->description;
         s_note.exception = (uint32_t)info->exception;
         s_note.core = (uint32_t)info->core;
+        for (size_t i = 0; i < sizeof(s_note.build); ++i) s_note.build[i] = s_build[i];
         s_note.abort_text[0] = '\0';
         if (g_panic_abort && g_panic_abort_details != NULL) {
             size_t i = 0;
@@ -93,26 +112,54 @@ void __wrap_esp_panic_handler(panic_info_t *info) {
 
 bool crash_note_valid(void) { return s_note.magic == CRASH_NOTE_MAGIC; }
 
+static bool same_build(void) { return memcmp(s_note.build, s_build, sizeof(s_build)) == 0; }
+
 const char *crash_note_text(void) {
-    static char line[112];  // 首页显示用，保持原样 / shown on the home screen; kept as it was
+    static char line[112];
     if (!crash_note_valid()) return NULL;
+    // 描述字符串在出事那版的 flash 里：换过固件就是别的内容，不读。
+    // The description lives in the crashing build's flash: after a reflash it is something else, so skip it.
+    const char *desc = same_build() && s_note.description != 0 ? (const char *)(uintptr_t)s_note.description : "";
     snprintf(line, sizeof(line), "panic pc=0x%08lx exc=%lu core=%lu %s",
-             (unsigned long)s_note.addr, (unsigned long)s_note.exception, (unsigned long)s_note.core,
-             s_note.description != 0 ? (const char *)(uintptr_t)s_note.description : "");
+             (unsigned long)s_note.addr, (unsigned long)s_note.exception, (unsigned long)s_note.core, desc);
     return line;
 }
 
 void crash_note_log(void) {
     const char *line = crash_note_text();
     if (line == NULL) return;
-    ESP_LOGE(TAG, "%s", line);
-    // 抄来的文字可能没有结尾（记录被半截覆盖），打印前强制截断。
-    // The copied text may lack its terminator (a half-overwritten record); force one before printing.
+    // 抄来的文字可能没有结尾（记录被半截覆盖），用前强制截断。
+    // The copied text may lack its terminator (a half-overwritten record); force one before use.
     s_note.abort_text[sizeof(s_note.abort_text) - 1] = '\0';
+    char build[2 * sizeof(s_note.build) + 1];
+    for (size_t i = 0; i < sizeof(s_note.build); ++i) snprintf(build + 2 * i, 3, "%02x", s_note.build[i]);
+    char pcs[8 * 11 + 1];
+    size_t n = 0;
+    for (size_t i = 0; i < sizeof(s_note.stack_pc) / sizeof(s_note.stack_pc[0]); ++i)
+        n += (size_t)snprintf(pcs + n, sizeof(pcs) - n, " 0x%08lx", (unsigned long)s_note.stack_pc[i]);
+    ESP_LOGE(TAG, "%s", line);
+    ESP_LOGE(TAG, "build %s%s", build, same_build() ? "" : " (not this firmware: resolve with that build's ELF)");
     if (s_note.abort_text[0] != '\0') ESP_LOGE(TAG, "abort: %s", s_note.abort_text);
-    ESP_LOGE(TAG, "ra=0x%08lx stack pcs: 0x%08lx 0x%08lx 0x%08lx 0x%08lx 0x%08lx 0x%08lx 0x%08lx 0x%08lx",
-             (unsigned long)s_note.ra, (unsigned long)s_note.stack_pc[0], (unsigned long)s_note.stack_pc[1],
-             (unsigned long)s_note.stack_pc[2], (unsigned long)s_note.stack_pc[3],
-             (unsigned long)s_note.stack_pc[4], (unsigned long)s_note.stack_pc[5],
-             (unsigned long)s_note.stack_pc[6], (unsigned long)s_note.stack_pc[7]);
+    ESP_LOGE(TAG, "ra=0x%08lx stack pcs:%s", (unsigned long)s_note.ra, pcs);
+
+    // 时间是这次开机的时间（崩溃后立即重启，差不了几秒）。/ The time is this boot's (the restart follows the crash within seconds).
+    char when[24] = "";
+    const time_t now = time(NULL);
+    if (now >= 1704067200) {
+        struct tm tm;
+        localtime_r(&now, &tm);
+        strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &tm);
+    }
+    FILE *f = fopen(CRASH_LOG_PATH, "a");
+    if (!f) {
+        ESP_LOGW(TAG, "card not writable: record kept for the next boot");
+        return;
+    }
+    fprintf(f, "%s reset=%d build=%s\n%s\n", when, (int)esp_reset_reason(), build, line);
+    if (s_note.abort_text[0] != '\0') fprintf(f, "abort: %s\n", s_note.abort_text);
+    fprintf(f, "ra=0x%08lx stack pcs:%s\n\n", (unsigned long)s_note.ra, pcs);
+    if (fclose(f) == 0) {
+        s_note.magic = 0;
+        ESP_LOGI(TAG, "record appended to %s and cleared", CRASH_LOG_PATH);
+    }
 }

@@ -2,10 +2,12 @@
  * SPDX-FileCopyrightText: 2026 mindreset
  * SPDX-License-Identifier: Apache-2.0
  *
- * 中文：崩溃现场的读取接口。记录由 panic 包装器写进 RTC，这里只负责读出来给屏显和串口。
+ * 中文：崩溃现场的读取接口。记录由 panic 包装器写进 RTC（带出事固件的 ELF 摘要），开机时打到串口并
+ * 追加到 TF 卡上的 crash_log.txt，写成后清除。
  *
- * English: Reading side of the panic scene. The panic wrapper writes it into RTC; this only reads
- * it back for the screen and the log.
+ * English: Reading side of the panic scene. The panic wrapper writes it into RTC (with the ELF digest
+ * of the build that crashed); at boot it is logged and appended to crash_log.txt on the card, then
+ * cleared once written.
  */
 
 #pragma once
@@ -21,5 +23,7 @@ bool crash_note_valid(void);
 /// The address can go straight to addr2line against the firmware elf for a function and a line.
 const char *crash_note_text(void);
 
-/// 把记录打一遍（不清除）。启动时调用一次。/ Log the record once, without clearing it. Call at boot.
+/// 把记录打到串口并追加到 /sdcard/crash_log.txt，写成后清除；写不上卡就留着，下次开机再试。启动时调用一次。
+/// Log the record and append it to /sdcard/crash_log.txt, clearing it once written; if the card cannot
+/// be written it stays for the next boot. Call once at boot.
 void crash_note_log(void);
