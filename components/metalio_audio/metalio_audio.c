@@ -344,11 +344,9 @@ esp_err_t metalio_audio_open(int sample_rate, bool capture) {
     if (!metalio_audio_wait_ready(5000)) return ESP_ERR_INVALID_STATE;
     if (xSemaphoreTake(s_i2s_lock, pdMS_TO_TICKS(1000)) != pdTRUE) return ESP_ERR_TIMEOUT;
     esp_err_t err = ESP_OK;
-    bool quiesced = false;
     if (s_tx && s_rate == sample_rate && (s_capture || !capture)) goto done;
     // 重开期间（含测时钟，它也用发送缓冲）不许读写。/ No I/O while reopening (the clock measurement uses the TX buffer too).
     io_quiesce();
-    quiesced = true;
     close_locked();
     log_heap("i2s before");
     // BH1098G V1.03 不支持 AT+SAMPLE（回 AT ERROR），时钟固定 16 kHz；其他采样率由调用方重采样。
@@ -393,7 +391,7 @@ esp_err_t metalio_audio_open(int sample_rate, bool capture) {
         s_actual_rate = measure_rate_locked();
     } else close_locked();
 done:
-    if (quiesced) io_resume();
+    io_resume();  // 快路径上本来就没挡读写，复位无副作用 / a no-op on the fast path, where I/O was never blocked
     xSemaphoreGive(s_i2s_lock);
     ESP_LOGI(TAG, "i2s open %d Hz capture=%d: %s", sample_rate, capture, esp_err_to_name(err));
     log_heap("i2s after");

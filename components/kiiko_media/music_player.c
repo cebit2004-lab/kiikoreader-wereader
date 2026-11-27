@@ -160,7 +160,7 @@ static int64_t s_paused_us;  // 进入暂停的时刻 / when playback was paused
 
 // AI 正在用或预热着音频（麦克风+喇叭）：音乐不能接手或打开 I2S。
 // The AI is using or holding audio warm (mic + speaker): music must not adopt or open I2S.
-static bool ai_holds_audio(void) { return ai_active() || ai_audio_busy() || ai_warm_held(); }
+static bool ai_holds_audio(void) { return ai_active() || ai_warm_held(); }  // ai_audio_busy 蕴含 ai_active / implied by ai_active
 
 // ---------------------------------------------------------------- status helpers
 
@@ -835,7 +835,7 @@ static void handle(const cmd_t *cmd) {
         start_track(cmd->arg);
         break;
     case CMD_TOGGLE:
-        if (s_st.state == MUSIC_PLAYING || s_st.state == MUSIC_BUFFERING) {
+        if (music_playing()) {
             s_paused_us = esp_timer_get_time();
             set_state(MUSIC_PAUSED);
             metalio_audio_set_pa(false);

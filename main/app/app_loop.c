@@ -1023,7 +1023,6 @@ void app_loop_run(const app_loop_config_t* config) {
         ctx.request_back_ripple = false;
         bool selected_from_menu = false;
         const bool power_input_owned = power_dialog_open;
-        bool quick_lock_requested = false;
         bool quick_input_owned = false;
 
         // Manual recovery owns SD/font lifecycle. Keep its page live, but do not reopen files,
@@ -1392,16 +1391,16 @@ void app_loop_run(const app_loop_config_t* config) {
         // 电源键短按默认锁屏；阅读正文可选择将它用于下一页。
         // A short power press normally locks; the reader body may use it for the next page.
         if (!app_sd_recovery_busy() &&
-            (quick_lock_requested || (read_pico_pmu_ready() && !current->holds_pmu && !usb_storage_active()
-            && ctx.now_ms - last_lock_poll_ms >= APP_LOCK_POLL_MS))) {
+            read_pico_pmu_ready() && !current->holds_pmu && !usb_storage_active()
+            && ctx.now_ms - last_lock_poll_ms >= APP_LOCK_POLL_MS) {
             last_lock_poll_ms = ctx.now_ms;
-            read_pico_pmu_key_action_t key_action = quick_lock_requested ? READ_PICO_PMU_KEY_SHORT : read_pico_pmu_take_key_action();
+            read_pico_pmu_key_action_t key_action = read_pico_pmu_take_key_action();
             if (key_action != READ_PICO_PMU_KEY_NONE) {
                 ai_dismiss(&ctx,current,key_action==READ_PICO_PMU_KEY_SHORT);
                 last_input_ms = ctx.now_ms;
                 bool quick_was_open = s_quick.open;
                 if (quick_was_open) quick_dismiss(&ctx,current,false);
-                if (!quick_lock_requested && ctx.now_ms < s_lock_ignore_until_ms) {
+                if (ctx.now_ms < s_lock_ignore_until_ms) {
                     ESP_LOGI(TAG, "ignore boot power-key action %d", (int)key_action);
                 } else if (key_action == READ_PICO_PMU_KEY_LONG) {
                     held_key = -1;
@@ -1448,7 +1447,7 @@ void app_loop_run(const app_loop_config_t* config) {
                     cancel_gesture(&ctx, current, &gesture);
                     if (menu_pressed >= 0) menu_feedback(&ctx, current, menu_leaf, menu_pressed, false, &feedback);
                     menu_pressed = UI_MENU_HIT_NONE;
-                    app_redraw_t power_redraw = !quick_lock_requested && !quick_was_open && !menu_open && current->on_power_short
+                    app_redraw_t power_redraw = !quick_was_open && !menu_open && current->on_power_short
                         ? current->on_power_short(&ctx) : APP_REDRAW_NONE;
                     if (power_redraw != APP_REDRAW_NONE) {
                         present_page(&ctx, current, &gesture, power_redraw);

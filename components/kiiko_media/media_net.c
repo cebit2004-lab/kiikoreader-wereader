@@ -27,15 +27,14 @@ static SemaphoreHandle_t s_lock;
 static StaticSemaphore_t s_lock_storage;
 /*
  * 所有权按传书组件的会话编号认：本模块启动的那次会话编号记在 s_gen。别人（传书页、升级、快捷开关）停掉
- * 或重开过会话，编号就变了，收回时不再动它。s_keep_after：这次连接顶替的是别人原本开着的 WiFi（比如为了
+ * 或重开过会话，编号就变了，收回时不再动它；s_gen 为 0 表示不归本模块。s_keep_after：这次连接顶替的是别人原本开着的 WiFi（比如为了
  * 腾内存先断开再重连），收回时保持连着，不替用户关 WiFi。
  * Ownership follows the transfer component's session number: the session this module started is noted in
  * s_gen. Once someone else (the transfer page, an update, the quick toggle) stops or reopens the session,
- * the number changes and release leaves it alone. s_keep_after: this connection replaced WiFi someone else
+ * the number changes and release leaves it alone; s_gen 0 means this module owns nothing. s_keep_after: this connection replaced WiFi someone else
  * had up (say, dropped to free memory and rejoined), so release leaves it connected rather than turning
  * the user's WiFi off.
  */
-static bool s_owns;
 static uint32_t s_gen;
 static bool s_keep_after;
 static bool s_adopt_next;  ///< 下一次自己启动的会话顶替了别人的 WiFi / the next session started here replaces someone else's WiFi
@@ -45,20 +44,30 @@ static void take(void) {
     xSemaphoreTake(s_lock, portMAX_DELAY);
 }
 
+// 放手：不再认这个会话。/ Let go of the session.
+static void disown(void) {
+    s_gen = 0;
+    s_keep_after = false;
+}
+
 // 本模块启动的会话仍是当前会话。/ The session this module started is still the current one.
 static bool owns_current(void) {
-    if (s_owns && s_gen != read_pico_transfer_session_id()) {
+    if (s_gen && s_gen != read_pico_transfer_session_id()) {
         ESP_LOGI(TAG, "network session replaced by another owner");
-        s_owns = false;
-        s_keep_after = false;
+        disown();
     }
-    return s_owns;
+    return s_gen != 0;
+}
+
+// 热点模式也报 network_ready，但它连不上外网：只认连着路由器的 STA。
+// Hotspot mode reports network_ready too but has no internet: only an STA joined to a router counts.
+static bool sta_online(const read_pico_transfer_status_t *st) {
+    return st->network_ready && st->mode == READ_PICO_TRANSFER_MODE_STA;
 }
 
 static bool start_own(void) {
     const read_pico_transfer_cfg_t cfg = {.mode = READ_PICO_TRANSFER_MODE_STA, .network_only = true};
     if (read_pico_transfer_start(&cfg) != ESP_OK) { s_adopt_next = false; return false; }
-    s_owns = true;
     s_gen = read_pico_transfer_session_id();
     s_keep_after = s_adopt_next;
     s_adopt_next = false;
@@ -69,9 +78,7 @@ bool media_net_acquire(char *err, size_t err_size, const volatile bool *cancel) 
     take();
     read_pico_transfer_status_t st;
     read_pico_transfer_get_status(&st);
-    // 热点模式也报 network_ready，但它连不上外网：只认连着路由器的 STA。
-    // Hotspot mode reports network_ready too but has no internet: only an STA joined to a router counts.
-    bool ok = st.network_ready && st.mode == READ_PICO_TRANSFER_MODE_STA;
+    bool ok = sta_online(&st);
     if (!ok) {
         char ssid[33];
         bool configured = false;
@@ -89,7 +96,7 @@ bool media_net_acquire(char *err, size_t err_size, const volatile bool *cancel) 
                 // waiting instead of tearing it down and starting over.
                 waiting = st.state == READ_PICO_TRANSFER_STARTING;
                 if (!waiting && read_pico_transfer_try_stop_if_idle()) {
-                    s_owns = false;
+                    disown();
                     waiting = start_own();
                 }
             } else if (st.mode == READ_PICO_TRANSFER_MODE_AP) {
@@ -110,7 +117,7 @@ bool media_net_acquire(char *err, size_t err_size, const volatile bool *cancel) 
                 for (int i = 0; i < 300 && !ok && !(cancel && *cancel); ++i) {
                     read_pico_transfer_service_poll();
                     read_pico_transfer_get_status(&st);
-                    ok = st.network_ready && st.mode == READ_PICO_TRANSFER_MODE_STA;
+                    ok = sta_online(&st);
                     if (!ok) vTaskDelay(pdMS_TO_TICKS(100));
                 }
             }
@@ -149,8 +156,7 @@ void media_net_drop(void) {
     if (st.state != READ_PICO_TRANSFER_STOPPED && st.mode == READ_PICO_TRANSFER_MODE_STA) {
         const bool keep = !ours || s_keep_after;
         if (read_pico_transfer_try_stop_if_idle()) {
-            s_owns = false;
-            s_keep_after = false;
+            disown();
             s_adopt_next = keep;
         }
     }
@@ -165,18 +171,14 @@ void media_net_release_if_unused(void) {
     if (owns_current() && !music_net_busy() && !ai_active() && !ai_net_busy() && !ai_warm_held()) {
         read_pico_transfer_status_t st;
         read_pico_transfer_get_status(&st);
-        if (st.state == READ_PICO_TRANSFER_STOPPED) {
-            // 已被别人停掉：只放手，不再调停止（它会顺手取消用户正在做的临时对时）。
-            // Already stopped by someone else: just let go; calling stop again would cancel a temporary
-            // time sync the user may be running.
-            s_owns = false;
-            s_keep_after = false;
-        } else if (s_keep_after) {
-            s_owns = false;
-            s_keep_after = false;
-            ESP_LOGI(TAG, "network handed back (it replaced WiFi that was already on)");
+        // 已被别人停掉，或顶替的是用户原本开着的 WiFi：只放手。再调停止会顺手取消用户正在做的临时对时。
+        // Already stopped by someone else, or it replaced WiFi the user had on: just let go. Calling stop
+        // again would cancel a temporary time sync the user may be running.
+        if (st.state == READ_PICO_TRANSFER_STOPPED || s_keep_after) {
+            if (s_keep_after) ESP_LOGI(TAG, "network handed back (it replaced WiFi that was already on)");
+            disown();
         } else if (read_pico_transfer_try_stop_if_idle()) {
-            s_owns = false;
+            disown();
             ESP_LOGI(TAG, "network released");
         }
     }

@@ -171,9 +171,8 @@ static uint8_t s_book_tracking = -APP_BOOK_TRACK_MIN, s_book_reading_line, s_boo
 static bool s_book_rule_full;
 static uint8_t s_book_indent = 2;
 static uint8_t s_book_indent_adjust = 20;
-// 没存过时的默认：Metalio47 为最短一档（存值 1，即 90 秒），Pico 为关闭。存过的「关闭」（0）照旧生效。
-// Default when never saved: the shortest option on Metalio47 (stored 1, i.e. 90 s), off on Pico. A saved
-// "off" (0) still applies.
+// 没存过时的默认：最短一档（存值 1，即 90 秒）。存过的「关闭」（0）照旧生效。
+// Default when never saved: the shortest option (stored 1, i.e. 90 s). A saved "off" (0) still applies.
 static uint8_t s_auto_lock_minutes = 1;
 static uint8_t s_shelf_style = 6;
 static char s_books_dir[MEDIA_DIR_MAX] = "/sdcard/books";

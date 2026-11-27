@@ -91,19 +91,20 @@ static const char *str(uint32_t off) { return s_str + off; }
 
 // 词库签名：全部英文词条的 FNV 哈希。词条不变时（只补例句、词形）旧进度照用。
 // Book signature: FNV over all headwords, so progress survives regenerations that only add examples or forms.
+// FNV-1a 续算：从 h 接着把 s 混进去。/ FNV-1a continued: mix s into h.
+static uint32_t fnv_mix(uint32_t h, const char *s) {
+    for (; *s; ++s) h = (h ^ (uint8_t)*s) * 16777619u;
+    return h;
+}
+
 static uint32_t book_sig(void) {
     uint32_t h = 2166136261u ^ s_head->words;
-    for (int i = 0; i < s_head->words; ++i)
-        for (const char *p = str(s_word[i]); *p; ++p) h = (h ^ (uint8_t)*p) * 16777619u;
+    for (int i = 0; i < s_head->words; ++i) h = fnv_mix(h, str(s_word[i]));
     return h;
 }
 
 // 单个词头的 FNV 哈希，用来把旧进度对到新词库。/ FNV hash of one headword, to match old progress to a new book.
-static uint32_t word_hash(const char *s) {
-    uint32_t h = 2166136261u;
-    for (; *s; ++s) h = (h ^ (uint8_t)*s) * 16777619u;
-    return h;
-}
+static uint32_t word_hash(const char *s) { return fnv_mix(2166136261u, s); }
 
 // 北京时间的天数；时间未同步时沿用上次记下的日子。日子只往前走：时钟往回拨一个月以内时沿用原来的日子，
 // 今日计数照旧；往回超过一个月当作时钟被纠正。
@@ -290,7 +291,6 @@ static void load_progress(void) {
             return;
         }
     }
-    reset_progress();
 }
 
 void vocab_save(void) {
@@ -751,52 +751,65 @@ static bool same_first_pos(const char *a, const char *b) {
     return la == lb && !strncmp(a, b, la);
 }
 
+// 已选的选项（第 0 个是答案）：缓存英文和简短释义，比较新候选时不必再逐个解码。
+// Options picked so far (slot 0 is the answer), with English and short meaning cached so each new
+// candidate is compared without decoding the picked words again.
+typedef struct {
+    int n;
+    int *out;
+    const char *pos;          // 答案的词性 / the answer's part of speech
+    const char *en[4];
+    char zh[4][96];
+} picked_t;
+
+static bool picked_has(const picked_t *pk, int cand) {
+    for (int k = 0; k < pk->n; ++k)
+        if (pk->out[k] == cand) return true;
+    return false;
+}
+
 // 干扰项是否可用：英文和释义都不同于答案和已选的选项。/ A distractor must differ from the answer and the
 // options so far in both English and meaning.
-static bool option_ok(const vocab_word_t *w, const char *mine, int cand, const int *out, int n, bool same_pos) {
+static bool option_ok(picked_t *pk, int cand, bool same_pos) {
     vocab_word_t c;
-    if (cand < 0 || cand >= s_head->words || !vocab_word(cand, &c)) return false;
-    if (same_pos && !same_first_pos(w->pos, c.pos)) return false;
-    if (!strcasecmp(c.en, w->en)) return false;
-    char other[96], om[96];
-    vocab_short_meaning(c.zh, other, sizeof(other));
-    if (!strcmp(other, mine)) return false;
-    for (int k = 0; k < n; ++k) {
-        vocab_word_t o;
-        vocab_word(out[k], &o);
-        vocab_short_meaning(o.zh, om, sizeof(om));
-        if (out[k] == cand || !strcasecmp(o.en, c.en) || !strcmp(om, other)) return false;
-    }
+    if (cand < 0 || cand >= s_head->words || picked_has(pk, cand) || !vocab_word(cand, &c)) return false;
+    if (same_pos && !same_first_pos(pk->pos, c.pos)) return false;
+    char *zh = pk->zh[pk->n];
+    vocab_short_meaning(c.zh, zh, sizeof(pk->zh[0]));
+    for (int k = 0; k < pk->n; ++k)
+        if (!strcasecmp(pk->en[k], c.en) || !strcmp(pk->zh[k], zh)) return false;
+    pk->en[pk->n] = c.en;
     return true;
 }
+
+static void pick(picked_t *pk, int cand) { pk->out[pk->n++] = cand; }
 
 int vocab_quiz_options(int id, int out[4]) {
     vocab_word_t w;
     if (!vocab_word(id, &w)) return 0;
-    char mine[96];
-    vocab_short_meaning(w.zh, mine, sizeof(mine));
+    picked_t pk = {.n = 0, .out = out, .pos = w.pos};
+    pk.en[0] = w.en;
+    vocab_short_meaning(w.zh, pk.zh[0], sizeof(pk.zh[0]));
+    pick(&pk, id);
     const int words = s_head->words;
-    int n = 1;
-    out[0] = id;
     // 干扰项先在附近（同一册附近的词）找同词性的，找不到再放宽。
     // Distractors: nearby words (same book region) with the same POS first, then anything nearby.
-    for (int pass = 0; pass < 3 && n < 4; ++pass) {
+    for (int pass = 0; pass < 3 && pk.n < 4; ++pass) {
         const int span = pass == 0 ? 150 : pass == 1 ? 400 : words;
-        for (int tries = 0; tries < 60 && n < 4; ++tries) {
+        for (int tries = 0; tries < 60 && pk.n < 4; ++tries) {
             const int cand = id - span + (int)(esp_random() % (uint32_t)(2 * span + 1));
-            if (option_ok(&w, mine, cand, out, n, pass < 2)) out[n++] = cand;
+            if (option_ok(&pk, cand, pass < 2)) pick(&pk, cand);
         }
     }
-    // 随机没凑够：从下一个词起顺序找，规则不变。/ Not enough at random: scan onward from the word, same rules.
-    for (int k = 1; k < words && n < 4; ++k)
-        if (option_ok(&w, mine, (id + k) % words, out, n, false)) out[n++] = (id + k) % words;
-    // 词库太小或释义全相同时只求不重复。/ A tiny book or identical meanings: just avoid repeats.
-    for (int k = 1; k < words && n < 4; ++k) {
-        const int cand = (id + k) % words;
-        bool dup = false;
-        for (int j = 0; j < n; ++j) dup |= out[j] == cand;
-        if (!dup) out[n++] = cand;
-    }
+    // 随机没凑够：从下一个词起顺序找，规则不变；仍不够（词库太小或释义全相同）就只求不重复。
+    // Not enough at random: scan onward with the same rules; if still short (a tiny book or identical
+    // meanings), only avoid repeats.
+    for (int strict = 1; strict >= 0 && pk.n < 4; --strict)
+        for (int k = 1; k < words && pk.n < 4; ++k) {
+            const int cand = (id + k) % words;
+            if (strict ? option_ok(&pk, cand, false) : !picked_has(&pk, cand)) pick(&pk, cand);
+        }
+    int n = pk.n;
     for (; n < 4; ++n) out[n] = id;   // 全库不足四个词 / fewer than four words in all
     const int right = (int)(esp_random() % 4u);
     const int t = out[right]; out[right] = out[0]; out[0] = t;

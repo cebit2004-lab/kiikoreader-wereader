@@ -46,8 +46,8 @@ bool ui_quick_menu_draw_button(uint8_t *fb,unsigned i,bool enabled,bool pressed,
     if(!fb||!dirty||i>=4)return false;
     EpdRect r=key_rect(i);int cx=UI_QUICK_CENTER_X(i),cy=UI_QUICK_CENTER_Y(i),rad=UI_QUICK_RADIUS;
     if(s_key_pixels&&s_frame==fb&&s_rotation==epd_get_rotation())restore_tile(fb,r,s_key_pixels+i*KEY_BYTES);else solid_key(fb,i);
-    // 与Pico相同：启用只改变状态点，保留原玻璃底图和黑色图标。没编入蓝牙时蓝牙键画成浅灰、不带状态点。
-    // Like Pico, activation changes only the badge, retaining refracted glass and the black icon. Without
+    // 启用只改变状态点，保留原玻璃底图和黑色图标。没编入蓝牙时蓝牙键画成浅灰、不带状态点。
+    // Activation changes only the badge, retaining refracted glass and the black icon. Without
     // Bluetooth built in, the Bluetooth key is drawn light gray with no badge.
     const bool unavailable=i==1&&!app_settings_ble_available();
     ui_draw_icon(fb,cx,cy,44,icons[i],unavailable?UI_GRAY_LIGHT:UI_GRAY_BLACK);

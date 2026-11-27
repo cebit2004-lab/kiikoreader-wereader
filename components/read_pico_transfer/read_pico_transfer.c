@@ -705,7 +705,6 @@ static bool s_hint_checked;        ///< 本次联网已核对过信道 / channel
 static int64_t s_wifi_begin_ms;    ///< 开始联网的时刻 / when bring-up began
 static int64_t s_wifi_started_ms;  ///< esp_wifi_start 返回的时刻 / when esp_wifi_start returned
 static uint32_t s_session_id;      ///< 每次获准启动加一 / incremented on every admitted start
-static bool s_resuming_session;    ///< 睡眠恢复：沿用原编号 / resuming after sleep keeps the number
 
 uint32_t read_pico_transfer_session_id(void) { return __atomic_load_n(&s_session_id, __ATOMIC_ACQUIRE); }
 
@@ -2368,12 +2367,12 @@ bool read_pico_transfer_pause_for_sleep(void) {
     return true;
 }
 
+static esp_err_t start_impl(const read_pico_transfer_cfg_t *cfg, bool new_session);
+
 void read_pico_transfer_resume_after_sleep(void) {
     if (!s_sleep_paused) return;
     s_sleep_paused = false;
-    s_resuming_session = true;  // 同一会话，编号不变 / the same session; keep its number
-    esp_err_t err = read_pico_transfer_start(&s_sleep_cfg);
-    s_resuming_session = false;
+    esp_err_t err = start_impl(&s_sleep_cfg, false);  // 同一会话，编号不变 / the same session; keep its number
     if (err != ESP_OK) ESP_LOGW("transfer", "resume after sleep: %s", esp_err_to_name(err));
 }
 
@@ -2409,7 +2408,8 @@ void read_pico_transfer_stop(void) {
     portEXIT_CRITICAL(&s_lock);
 }
 
-esp_err_t read_pico_transfer_start(const read_pico_transfer_cfg_t *cfg) {
+// new_session 为假时沿用会话编号（睡眠恢复）。/ new_session false keeps the session number (sleep resume).
+static esp_err_t start_impl(const read_pico_transfer_cfg_t *cfg, bool new_session) {
     if (!cfg || (cfg->network_only && cfg->mode != READ_PICO_TRANSFER_MODE_STA) ||
         (!cfg->network_only && (!cfg->root_dir || !cfg->free_bytes_cb)) ||
         (cfg->root_dir && strlen(cfg->root_dir) >= sizeof(s_root)) ||
@@ -2424,7 +2424,7 @@ esp_err_t read_pico_transfer_start(const read_pico_transfer_cfg_t *cfg) {
     // 新会话换一个编号，之前记下编号的主人（音乐/AI）就知道这已不是它启动的那次。睡眠恢复沿用原编号。
     // A new session gets a new number, so an earlier owner (music/AI) that noted the old one knows this is
     // no longer the session it started. Resuming after sleep keeps the old number.
-    if (!s_resuming_session) __atomic_add_fetch(&s_session_id, 1, __ATOMIC_RELEASE);
+    if (new_session) __atomic_add_fetch(&s_session_id, 1, __ATOMIC_RELEASE);
     // 传输服务持有临时BLE租约。用户2026-11-11：BLE 控制器约占40KB内部RAM；rc111 下即使
     // “仅联网”会话（连接路由器/对时/云端）在内部RAM不足时也必须先停BLE，否则 WiFi 静态RX
     // 缓冲初始化失败，界面显示“连接启动失败”。RAM 充裕时仍保留原有BLE共存行为。
@@ -2687,4 +2687,6 @@ fail:
     clear_secret(&wifi, sizeof(wifi)); clear_secret(&saved, sizeof(saved));
     read_pico_transfer_stop(); release_config(); set_error(err); return err;
 }
+
+esp_err_t read_pico_transfer_start(const read_pico_transfer_cfg_t *cfg) { return start_impl(cfg, true); }
 #endif

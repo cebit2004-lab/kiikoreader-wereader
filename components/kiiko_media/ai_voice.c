@@ -2086,15 +2086,20 @@ static bool open_audio(void) {
     return true;
 }
 
+// 放下 AI 打开的 I2S：音乐已经在用（开着就直接沿用）就交给它，不关。
+// Let go of the I2S the AI opened: if music is already using it (it reuses an open one), hand it over
+// rather than close it.
+static void release_i2s(const char *why) {
+    if (music_active()) ai_log("%s: i2s left to music", why);
+    else metalio_audio_close();
+    atomic_store(&s_audio_open, false);
+}
+
 static void warm_release(const char *why) {
     if (!atomic_load(&s_warm) || atomic_load(&s_session)) return;
     atomic_store(&s_tearing_down, true);
     atomic_store(&s_warm, false);
-    // 音乐已经在用这个 I2S（开着就直接沿用）：交给它，不关。/ Music is already using this I2S (it reuses an
-    // open one): hand it over rather than close it.
-    if (music_active()) ai_log("warm: i2s left to music");
-    else metalio_audio_close();
-    s_audio_open = false;
+    release_i2s("warm");
     ai_log("warm: released (%s)", why);
     if (atomic_load(&s_reapers) > 0) {
         s_release_pending_us = esp_timer_get_time();
@@ -2441,9 +2446,7 @@ static void ctl_task(void *arg) {
         if (atomic_load(&s_audio_open) && !atomic_load(&s_session) && !atomic_load(&s_warm) &&
             atomic_load(&s_workers) == 0 && atomic_load(&s_handlers) == 0) {
             ctl_step("deferred i2s close");
-            if (music_active()) ai_log("deferred i2s close: left to music");
-            else metalio_audio_close();
-            atomic_store(&s_audio_open, false);
+            release_i2s("deferred i2s close");
             ai_log("workers exited; i2s released");
             s_ctl_step = NULL;
         }
