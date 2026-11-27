@@ -103,6 +103,8 @@
 #include "book/book_source.h"
 #include "online_font.h"
 #include "local_latency_probe.h"
+#include "power_log.h"
+#include "cpu_boost.h"
 
 #define TAG "app_loop"
 
@@ -1005,7 +1007,12 @@ void app_loop_run(const app_loop_config_t* config) {
         // S31无后台CW32快照，轮询BQ/充电器（适配器内部每2秒限流）。
         // S31 polls its gauge/charger; the adapter rate-limits I2C to once per two seconds.
         if (read_pico_pmu_ready()) (void)read_pico_pmu_poll();
+        // 耗电日志：状态按耗电大户标，其余记当前页面。/ Drain log: tag the big consumers, else the current page.
+        power_log_tick(ai_active() ? "ai" : music_playing() ? "music" : usb_storage_active() ? "usb" :
+                       current->title ? current->title : "page");
         if (err == ESP_OK && (touch.touched || released)) last_input_ms = ctx.now_ms;
+        // 一碰屏就全速，再处理这次触摸。/ Full speed as soon as the screen is touched, before handling it.
+        cpu_boost_set(touch.touched || ctx.now_ms - last_input_ms < CPU_BOOST_HOLD_MS);
         if (ctx.now_ms - last_network_poll_ms >= 500) {
             last_network_poll_ms = ctx.now_ms;
             read_pico_transfer_service_poll();
@@ -1585,6 +1592,9 @@ void app_loop_run(const app_loop_config_t* config) {
             current->holds_pmu || power_dialog_open || touch.touched ||
             ctx.request_app || ctx.request_menu || ctx.request_return;
         if (idle_blocked || requested_idle != idle_minutes) last_input_ms = ctx.now_ms;
+        // 忙（联网、音乐、AI、U 盘等，见上）也算刚操作过：保持全速。/ Busy (network, music, AI, USB drive and
+        // so on, above) counts as fresh input too: stay at full speed.
+        cpu_boost_set(touch.touched || ctx.now_ms - last_input_ms < CPU_BOOST_HOLD_MS);
         idle_minutes = requested_idle;
         // Recognized standby uses the existing lock/resume path, with normal lock safety gates.
         extern const app_desc_t app_book;

@@ -12,6 +12,7 @@
  */
 
 #include "metalio_audio.h"
+#include "cpu_boost.h"
 #include "music_player.h"
 #include "ai_voice.h"
 #include "esp_heap_caps.h"
@@ -162,6 +163,7 @@ void app_main(void) {
     metalio_capture_boot_power_key();
     app_lock_capture_boot_wakeup();
     ESP_ERROR_CHECK(metalio_sleep_sdk_init());
+    cpu_boost_init();
     // 共享 TF 卡期间复位后，先把内部 PHY 交回串口，再清理已用完的 BOOT 请求。
     // Reclaim Serial/JTAG after a reset during card sharing, then clear the served BOOT request.
     usb_storage_phy_init();

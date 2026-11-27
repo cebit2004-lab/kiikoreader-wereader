@@ -40,6 +40,8 @@ bool ai_warm_held(void){return false;}
 void ai_start(void){}
 void ai_toggle(void){}
 bool music_playing(void){return false;}
+void power_log_tick(const char *tag){(void)tag;}
+void cpu_boost_set(bool on){(void)on;}
 bool app_settings_ble_available(void){return true;}  // 测试覆盖有蓝牙的固件 / the test covers firmware with Bluetooth
 static int power_open_draws, power_controls_draws, power_final_draws;
 static int power_trigger_step = -1, power_tap_step=-1, shutdowns, restarts;

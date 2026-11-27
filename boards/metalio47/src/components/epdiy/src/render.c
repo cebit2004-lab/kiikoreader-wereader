@@ -25,6 +25,19 @@
 #include "output_lcd/render_lcd.h"
 #include "esp_cpu.h"
 #include "epd_pipeline.h"
+#include "sdkconfig.h"
+#if CONFIG_PM_ENABLE
+#include "esp_pm.h"
+// 刷屏和算差分时持全速锁：CPU 要赶在 LCD 取数前备好行数据，降频会欠载。
+// Hold full speed while refreshing and computing differences: the CPU must prepare lines ahead of the
+// LCD, and a lowered clock would underrun.
+static esp_pm_lock_handle_t s_cpu_lock;
+static void cpu_full_speed(bool on) {
+    if (s_cpu_lock) (void)(on ? esp_pm_lock_acquire(s_cpu_lock) : esp_pm_lock_release(s_cpu_lock));
+}
+#else
+static void cpu_full_speed(bool on) { (void)on; }
+#endif
 
 #ifdef KIIKO_LOCAL_LATENCY
 static bool s_pipeline_enabled;
@@ -372,14 +385,20 @@ static enum EpdDrawError IRAM_ATTR epd_draw_base_impl(
 enum EpdDrawError IRAM_ATTR epd_draw_base(EpdRect area,const uint8_t* data,EpdRect crop,
     enum EpdDrawMode mode,int temperature,const bool* lines,const uint8_t* columns,
     const EpdWaveform* waveform) {
-    return epd_draw_base_impl(area,data,crop,mode,temperature,lines,columns,waveform,-1);
+    cpu_full_speed(true);
+    const enum EpdDrawError err=epd_draw_base_impl(area,data,crop,mode,temperature,lines,columns,waveform,-1);
+    cpu_full_speed(false);
+    return err;
 }
 
 enum EpdDrawError IRAM_ATTR epd_draw_base_from_phase(EpdRect area,const uint8_t* data,EpdRect crop,
     enum EpdDrawMode mode,int temperature,const bool* lines,const uint8_t* columns,
     const EpdWaveform* waveform,int first_phase) {
     if(first_phase<0)return EPD_DRAW_INVALID_CROP;
-    return epd_draw_base_impl(area,data,crop,mode,temperature,lines,columns,waveform,first_phase);
+    cpu_full_speed(true);
+    const enum EpdDrawError err=epd_draw_base_impl(area,data,crop,mode,temperature,lines,columns,waveform,first_phase);
+    cpu_full_speed(false);
+    return err;
 }
 
 static void IRAM_ATTR render_thread(void* arg) {
@@ -446,6 +465,9 @@ void epd_renderer_init(enum EpdInitOptions options) {
 
     epd_current_board()->init(epd_width());
     epd_control_reg_init();
+#if CONFIG_PM_ENABLE
+    if(!s_cpu_lock&&esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX,0,"epd",&s_cpu_lock)!=ESP_OK)s_cpu_lock=NULL;
+#endif
 
     render_context.display_width = epd_width();
     render_context.display_height = epd_height();
@@ -640,7 +662,17 @@ void epd_difference_column_range(EpdRect crop_to, int* x_start, int* x_end) {
     *x_end = end;
 }
 
-EpdRect epd_difference_image_base(
+static EpdRect difference_image_impl(const uint8_t* to,const uint8_t* from,EpdRect crop_to,int fb_width,
+    int fb_height,uint8_t* interlaced,bool* dirty_lines,uint8_t* col_dirtyness);
+EpdRect epd_difference_image_base(const uint8_t* to,const uint8_t* from,EpdRect crop_to,int fb_width,
+    int fb_height,uint8_t* interlaced,bool* dirty_lines,uint8_t* col_dirtyness) {
+    cpu_full_speed(true);
+    const EpdRect r=difference_image_impl(to,from,crop_to,fb_width,fb_height,interlaced,dirty_lines,col_dirtyness);
+    cpu_full_speed(false);
+    return r;
+}
+
+static EpdRect difference_image_impl(
     const uint8_t* to,
     const uint8_t* from,
     EpdRect crop_to,

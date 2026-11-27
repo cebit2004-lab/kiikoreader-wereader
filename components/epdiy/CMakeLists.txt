@@ -30,7 +30,7 @@ if(DEFINED IDF_VERSION_MAJOR AND IDF_VERSION_MAJOR GREATER_EQUAL 6)
     list(APPEND epdiy_requires esp_driver_gpio esp_driver_rmt esp_driver_dma)
 endif()
 
-set(epdiy_private_requires hal soc esp_hw_support esp_rom spi_flash)
+set(epdiy_private_requires hal soc esp_hw_support esp_rom spi_flash esp_pm)
 if(DEFINED IDF_VERSION_MAJOR AND IDF_VERSION_MAJOR GREATER_EQUAL 6)
     list(APPEND epdiy_private_requires esp_hal_dma esp_hal_rmt esp_hal_lcd esp_hal_i2s)
 endif()

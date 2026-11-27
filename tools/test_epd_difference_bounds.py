@@ -23,6 +23,7 @@ static bool s_leading_skip_enabled;
 static uint8_t s_present[256];
 static const uint8_t *s_present_for;
 static void mark_present_line(const uint8_t*a,const uint8_t*b,int c){(void)a;(void)b;(void)c;abort();}
+static void cpu_full_speed(bool on){(void)on;}
 uint32_t epd_interlace_4bpp_line_VE(const uint8_t*,const uint8_t*,uint8_t*,uint8_t*,int);
 '''
 UNIT = r'''

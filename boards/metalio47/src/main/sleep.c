@@ -13,6 +13,7 @@
  */
 
 #include "sleep.h"
+#include "power_log.h"
 #include "ui_avatar.h"
 #include "book_cover_jobs.h"
 #include "metalio_hw.h"
@@ -859,6 +860,10 @@ void enter_lock_and_sleep(
     bool reader_background
 ) {
     const int64_t lock_at = esp_timer_get_time();
+    // 卡还挂着：先记下锁屏前的电量，解锁后再记一行，两行之差就是睡眠期间的耗电。
+    // The card is still mounted: log the charge before locking; with the line after unlock, the
+    // difference is the drain while asleep.
+    power_log_mark("lock");
     // 先灭灯并消费本次锁屏动作；后续生成/推屏期间的新短按必须保留给唤醒。
     // Turn the lamp off and consume the initiating action before composition; retain later wake presses.
     metalio_frontlight(0, 50);
@@ -970,6 +975,7 @@ void enter_lock_and_sleep(
         *ignore_until_ms = esp_timer_get_time() / 1000 + APP_LOCK_IGNORE_BOOT_MS;
     }
     ESP_LOGI(TAG, "unlocked");
+    power_log_mark("wake");
 }
 
 void app_lock_boot_gate(EpdiyHighlevelState *hl, cst836u_handle_t touch, sc7a20h_handle_t acc) {

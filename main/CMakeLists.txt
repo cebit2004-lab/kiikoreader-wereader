@@ -45,6 +45,7 @@ set(main_requires
     esp_http_client esp-tls
     mbedtls
     espressif__cjson
+    esp_pm
 )
 kiiko_board_sources(kiiko_selected_sources "${CMAKE_CURRENT_LIST_DIR}" "app_main.c"
         "boot_state.c"
@@ -58,6 +59,8 @@ kiiko_board_sources(kiiko_selected_sources "${CMAKE_CURRENT_LIST_DIR}" "app_main
         "display_reader_waveform.c"
         "metalio_text_ripple.c"
         "sleep.c"
+        "power_log.c"
+        "cpu_boost.c"
         "time_service.c"
         "lock_pin.c"
         "lock_pin_flow.c"
