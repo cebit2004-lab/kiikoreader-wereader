@@ -152,7 +152,10 @@ static const size_t k_play_ring_sizes[] = {2 * 1024 * 1024, 1024 * 1024, 384 * 1
     "帮忙概括或讨论书里的内容，推荐相关的书。医疗、法律、财务问题只提供一般信息，并建议咨询专业人士。" \
     "没听清或意思不完整时，请对方再说一遍，不要猜。"
 
-typedef enum { CMD_START, CMD_STOP, CMD_TOGGLE, CMD_CONFIGURE, CMD_WS_END, CMD_WARM, CMD_COOL } cmd_t;
+// CMD_EVENT 只是叫醒控制任务：WebSocket 回调要它做的事记在 s_want_configure / s_want_ws_end 里（见 post）。
+// CMD_EVENT only wakes the control task: what a WebSocket callback wants done is kept in s_want_configure /
+// s_want_ws_end (see post).
+typedef enum { CMD_START, CMD_STOP, CMD_TOGGLE, CMD_EVENT, CMD_WARM, CMD_COOL } cmd_t;
 
 static SemaphoreHandle_t s_lock;
 static QueueHandle_t s_cmds;
@@ -188,11 +191,11 @@ static int64_t s_release_pending_us;  // 开始等的时刻 / when the wait bega
 static _Atomic bool s_page_open;     // AI 页开着 / the AI page is open
 static _Atomic bool s_warm;          // 音频与 WiFi 由预热持有（不在对话中）/ audio and WiFi held by the warm-up (no chat)
 static int64_t s_warm_until_us;      // 到点收回 / release when due
-static _Atomic bool s_audio_open;    // 本模块打开的 I2S 还开着 / the I2S this module opened is still open
-// 收尾进行中（结束对话或收回预热，含停 WiFi、写日志）、预热进行中：ai_fully_released 据此判断。
-// Teardown in progress (ending a chat or releasing the warm-up, WiFi stop and log write included), and
-// warm-up in progress: ai_fully_released checks these.
-static _Atomic bool s_tearing_down, s_warming;
+// WebSocket 回调要控制任务做、又不能丢的两件事：配置会话、连接已断。只置位不排队，控制任务每圈都看。
+// The two things a WebSocket callback needs the control task to do that must never be lost: configure
+// the session, and the connection ended. Set as flags rather than queued; the control task checks them
+// on every loop.
+static _Atomic bool s_want_configure, s_want_ws_end;
 // 「正在连接」时点了取消、开始命令还排在队里：开始命令到了就作废。
 // Cancel tapped while connecting with the start command still queued: drop it when it arrives.
 static _Atomic bool s_start_cancelled;
@@ -364,13 +367,16 @@ static void set_error(const char *msg) {
     unlock();
 }
 static void touch(void) { atomic_store(&s_last_activity_us, esp_timer_get_time()); }
-// 只由 WebSocket 回调调用。丢了「配置」或「断开」会话就卡在连接中，所以队列满时稍等一下。
-// Called from WebSocket callbacks only. Losing "configure" or "ended" would leave the chat stuck
-// connecting, so wait briefly when the queue is full.
-#define POST_WAIT_MS 200
-static void post(cmd_t cmd) {
-    if (s_cmds && xQueueSend(s_cmds, &cmd, pdMS_TO_TICKS(POST_WAIT_MS)) != pdTRUE)
-        ai_log("event command %d dropped: queue full", (int)cmd);
+// 只由 WebSocket 回调调用，绝不阻塞回调。丢了「配置」或「断开」会话就卡在连接中，所以先置位（不会丢），
+// 再不等待地塞一个 CMD_EVENT 叫醒控制任务；队列满也无妨，控制任务正忙，下一圈就会看到。
+// Called from WebSocket callbacks only, and never blocks them. Losing "configure" or "ended" would leave
+// the chat stuck connecting, so set the flag first (it cannot be lost), then post CMD_EVENT without
+// waiting to wake the control task; a full queue is fine, as the busy control task sees the flag on its
+// next loop.
+static void post(_Atomic bool *want) {
+    atomic_store(want, true);
+    const cmd_t wake = CMD_EVENT;
+    if (s_cmds) (void)xQueueSend(s_cmds, &wake, 0);
 }
 
 // ---------------------------------------------------------------- sending
@@ -567,7 +573,7 @@ static void handle_event(const char *text) {
     if (!type) { cJSON_Delete(root); return; }
     if (!strcmp(type, "session.created")) {
         ai_log("session.created");
-        post(CMD_CONFIGURE);
+        post(&s_want_configure);
     } else if (!strcmp(type, "session.updated")) {
         // 服务端回显的输出格式决定回复走不走重采样；没回显就按请求的算，并把回显原样记下备查。
         // The echoed output format decides whether replies are resampled; without an echo, assume the
@@ -672,7 +678,7 @@ static void handle_event(const char *text) {
         if (!atomic_load(&s_streaming) && s_reply_rate_req != REPLY_RATE_DEFAULT) {
             ai_log("retrying session.update with %d Hz output", REPLY_RATE_DEFAULT);
             s_reply_rate_req = REPLY_RATE_DEFAULT;
-            post(CMD_CONFIGURE);
+            post(&s_want_configure);
             cJSON_Delete(root);
             return;
         }
@@ -762,13 +768,13 @@ static void ws_event_live(int32_t id, esp_websocket_event_data_t *ev, unsigned g
         } else {
             snprintf(msg, cap, "连接 AI 服务失败（errno %d）", e->esp_transport_sock_errno);
         }
-        post(CMD_WS_END);
+        post(&s_want_ws_end);
         break;
     }
     case WEBSOCKET_EVENT_DISCONNECTED:
     case WEBSOCKET_EVENT_CLOSED:
         ai_log("ws %s", id == WEBSOCKET_EVENT_CLOSED ? "closed" : "disconnected");
-        post(CMD_WS_END);
+        post(&s_want_ws_end);
         break;
     default:
         break;
@@ -924,7 +930,10 @@ static void mic_task(void *arg) {
     int noise = 0, loud = 0, quiet = 0, frames = 0, pre_count = 0, pre_head = 0, level_max = 0, chunks = 0;
     bool speaking = false;
     while (pcm && preroll && atomic_load(&s_session)) {
-        const int n = metalio_audio_read(pcm, MIC_SAMPLES, pdMS_TO_TICKS(200));
+        const int n = metalio_audio_read(METALIO_AUDIO_OWNER_AI, pcm, MIC_SAMPLES, pdMS_TO_TICKS(200));
+        // 已不归 AI（会话正在结束）：读立即返回 -1，别空转。/ No longer the AI's (the chat is ending): the
+        // read returns -1 at once, so do not spin.
+        if (n < 0) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
         if (n != MIC_SAMPLES || !atomic_load(&s_streaming)) continue;
         if (s_st.state == AI_SPEAKING || s_st.state == AI_THINKING || playing_recently()) {
             speaking = false; loud = quiet = pre_count = 0;
@@ -1334,7 +1343,7 @@ static void play_task(void *arg) {
             if (feed_end_us && w0 - feed_end_us > DIAG_GAP_US)
                 diag_note("feed gap %u ms (%u bytes waiting)", (unsigned)((w0 - feed_end_us) / 1000),
                           (unsigned)xStreamBufferBytesAvailable(s_play));
-            const int wrote = metalio_audio_write(buf, got / sizeof(int16_t), pdMS_TO_TICKS(500));
+            const int wrote = metalio_audio_write(METALIO_AUDIO_OWNER_AI, buf, got / sizeof(int16_t), pdMS_TO_TICKS(500));
             feed_end_us = esp_timer_get_time();
             const int64_t audio_us = (int64_t)(got / sizeof(int16_t)) * 1000000 / AUDIO_RATE;
             if (feed_end_us - w0 > audio_us + DIAG_SLOW_US)
@@ -1438,9 +1447,15 @@ static void mem_audit(void) {
            s_tcpip_existed && (int)dma + 512 < (int)s_mem_dma_before ? "  <-- NOT RETURNED" : "", note);
 }
 
+// 先把日志写到 TF 卡上再放下网络：网络一放下，进入 U 盘模式的一方就会接管 TF 卡（见 usb_storage），之后不能再写卡。
+// 放下后 mem_audit 记的那行留到下次再写。
+// Write the log to the card before letting go of the network: once it is let go, entering USB drive mode
+// takes the card over (see usb_storage), and the card must not be written after that. The line mem_audit
+// adds afterwards is written next time.
 static void release_network(void) {
     atomic_store(&s_release_pending, false);
-    media_net_release_if_unused();
+    log_flush();
+    media_net_release(MEDIA_NET_AI);
     mem_audit();
 }
 
@@ -1904,6 +1919,10 @@ static bool ws_open(void) {
     atomic_store(&s_rx_events, 0);
     atomic_store(&s_rx_last_us, esp_timer_get_time());
     s_ws_where = "library";
+    // 旧连接迟到的置位不能落到新连接上：开新代号前清掉。/ A late flag from the old connection must not hit
+    // the new one: clear them before the new generation goes live.
+    atomic_store(&s_want_configure, false);
+    atomic_store(&s_want_ws_end, false);
     atomic_store(&s_ws_gen, gen);
     s_connect_us = esp_timer_get_time();
     s_nudge_us = 0;
@@ -1995,8 +2014,6 @@ static void free_session_buffers(void) {
 }
 
 static void session_end(const char *err) {
-    // 到 WiFi 收回、日志写完为止都算收尾（见 ai_fully_released）。/ Teardown lasts until WiFi is released and the log written (see ai_fully_released).
-    atomic_store(&s_tearing_down, true);
     atomic_store(&s_streaming, false);
     atomic_store(&s_session, false);
     s_retry_at_us = 0;
@@ -2017,20 +2034,15 @@ static void session_end(const char *err) {
     ctl_step("session_end: release");
     // 页面还开着就留着音频和 WiFi，接着问不用重新连（见 WARM_HOLD_MS）。
     // With the page still open, audio and WiFi stay for a follow-up (see WARM_HOLD_MS).
-    const bool keep = atomic_load(&s_page_open) && s_audio_open && workers_done;
+    const bool keep = atomic_load(&s_page_open) && metalio_audio_owner() == METALIO_AUDIO_OWNER_AI && workers_done;
     if (keep) {
         metalio_audio_set_pa(false);
-    } else if (workers_done) {
-        // 只关自己开的：没配密钥等早退时音乐可能还开着 I2S。/ Close only what this module opened: on an early
-        // exit (no API key, say) music may still have I2S open.
-        if (s_audio_open) metalio_audio_close();
-        s_audio_open = false;
     } else {
-        // 工作任务还在读写 I2S：这时关会让它们用已释放的通道。留着，等它们退出后由控制任务再关（见 ctl_task）。
-        // Workers are still in I2S calls: closing now would leave them on a freed channel. Keep it open;
-        // the control task closes it once they exit (see ctl_task).
-        metalio_audio_set_pa(false);
-        ai_log("i2s kept open until the workers exit");
+        // 放手只动 AI 自己占着的（没配密钥等早退时可能根本没占）。工作任务还没退出也可以：放手会等它们正在读写
+        // 的那一块，之后它们的读写都返回 -1。
+        // Releasing touches only the AI's own claim (an early exit, no API key say, may hold none). Workers
+        // still alive are fine: the release waits for the chunk they are in, and their I/O gets -1 after.
+        metalio_audio_release(METALIO_AUDIO_OWNER_AI);
     }
     // 任务没退出就不释放它们还在用的缓冲：宁可漏一次内存，也不能写坏堆。
     // Buffers still in use by a live task are kept: leaking once beats corrupting the heap.
@@ -2062,53 +2074,58 @@ static void session_end(const char *err) {
         atomic_store(&s_release_pending, true);
         ai_log("network kept until the old connection's task exits");
     } else {
-        release_network();
+        release_network();  // 已先写好日志 / writes the log first
+        return;
     }
     log_flush();
-    atomic_store(&s_tearing_down, false);
 }
 
 // 先开 I2S（麦克风+喇叭）再连 WiFi：I2S DMA 只能用内部 RAM，实测 WiFi 连上后最大空块只剩约 5.8 KB，
 // 先连网时 I2S 一次也没分到过，每次都得断网、开 I2S、再连一遍，白等约 5 秒。WiFi 已被别的功能连着
-// 而分不到时，才断网再开。已经开着（预热或上次对话留下）就直接成功。
+// 而分不到时，才断网再开。已经开着（预热或上次对话留下）就直接成功。音乐刚被停下、它的联网任务可能还占着
+// I2S 片刻，所以等它放手一会儿。
 // Open I2S (mic + speaker) before WiFi: I2S DMA must be internal RAM, and once WiFi is up the largest
 // free block measured only ~5.8 KB. Connecting first never once left room for I2S, so every chat
 // dropped WiFi, opened I2S and connected again, wasting ~5 s. Only when WiFi is already up for
 // something else and I2S does not fit is WiFi dropped first. Already open (warm-up or the last chat)
-// succeeds at once.
+// succeeds at once. Music may have just been stopped with its network task holding I2S for a moment, so
+// wait a little for it to let go.
+#define AUDIO_CLAIM_WAIT_MS 2000
+// 断 WiFi 前等本模块旧连接的任务退出：它的套接字可能还压着驱动的接收缓冲，驱动卸载后再归还就是访问已释放
+// 的内存。卡在 TCP 连接阶段时最长约等于连接超时（20 秒）。
+// Before dropping WiFi, wait for this module's old connection tasks to exit: a socket may still hold driver
+// receive buffers, and returning them after the driver is gone touches freed memory. A task stuck in the
+// TCP connect can take up to the connect timeout (20 s).
+#define REAPER_DROP_WAIT_MS 25000
 static bool open_audio(void) {
-    if (metalio_audio_open(AUDIO_RATE, true) != ESP_OK) {
-        ai_log("i2s did not fit; dropping wifi first");
-        media_net_drop();
-        if (metalio_audio_open(AUDIO_RATE, true) != ESP_OK) return false;
+    const esp_err_t err = metalio_audio_claim(METALIO_AUDIO_OWNER_AI, AUDIO_RATE, true, AUDIO_CLAIM_WAIT_MS);
+    if (err == ESP_OK) return true;
+    if (err == ESP_ERR_TIMEOUT) {
+        ai_log("i2s still held by %d", (int)metalio_audio_owner());
+        return false;
     }
-    s_audio_open = true;
-    return true;
-}
-
-// 放下 AI 打开的 I2S：音乐已经在用（开着就直接沿用）就交给它，不关。
-// Let go of the I2S the AI opened: if music is already using it (it reuses an open one), hand it over
-// rather than close it.
-static void release_i2s(const char *why) {
-    if (music_active()) ai_log("%s: i2s left to music", why);
-    else metalio_audio_close();
-    atomic_store(&s_audio_open, false);
+    ai_log("i2s did not fit; dropping wifi first");
+    const int64_t t0 = esp_timer_get_time();
+    while (atomic_load(&s_reapers) > 0 && esp_timer_get_time() - t0 < (int64_t)REAPER_DROP_WAIT_MS * 1000)
+        vTaskDelay(pdMS_TO_TICKS(100));
+    if (atomic_load(&s_reapers) > 0) ai_log("old connection still open after %d ms; dropping wifi anyway", REAPER_DROP_WAIT_MS);
+    // 音乐已被停下，不等它放下网络。/ Music has been stopped: do not wait for it to let go of the network.
+    media_net_drop(MEDIA_NET_AI, 0);
+    return metalio_audio_claim(METALIO_AUDIO_OWNER_AI, AUDIO_RATE, true, 0) == ESP_OK;
 }
 
 static void warm_release(const char *why) {
     if (!atomic_load(&s_warm) || atomic_load(&s_session)) return;
-    atomic_store(&s_tearing_down, true);
     atomic_store(&s_warm, false);
-    release_i2s("warm");
+    metalio_audio_release(METALIO_AUDIO_OWNER_AI);
     ai_log("warm: released (%s)", why);
     if (atomic_load(&s_reapers) > 0) {
         s_release_pending_us = esp_timer_get_time();
         atomic_store(&s_release_pending, true);
+        log_flush();
     } else {
-        release_network();
+        release_network();  // 已先写好日志 / writes the log first
     }
-    log_flush();
-    atomic_store(&s_tearing_down, false);
 }
 
 // 预热时打通上行（见 media_net_ensure_uplink），让刚连上 WiFi 时的卡顿在用户看页面时过去。
@@ -2127,11 +2144,7 @@ static void warm_up(void) {
     if (!atomic_load(&s_page_open) || atomic_load(&s_session) || atomic_load(&s_warm)) return;
     if (!RT_API_KEY[0] || music_active()) return;
     if (atomic_load(&s_workers) > 0 || atomic_load(&s_handlers) > 0) return;  // 上次还在收尾 / last chat still winding down
-    if (atomic_load(&s_audio_open)) return;  // 上次的 I2S 还没关（工作任务没退出）/ the last chat's I2S is not closed yet (workers alive)
-    // 预热进行中也算占着（见 ai_fully_released）。/ A warm-up in progress counts as holding (see ai_fully_released).
-    atomic_store(&s_warming, true);
     warm_up_run();
-    atomic_store(&s_warming, false);
 }
 
 static void warm_up_run(void) {
@@ -2148,7 +2161,7 @@ static void warm_up_run(void) {
     const int64_t t_i2s = esp_timer_get_time();
     char err[64] = {0};
     ctl_step("warm: wifi");
-    const bool ok = media_net_acquire(err, sizeof(err), &s_cancel);
+    const bool ok = media_net_acquire(MEDIA_NET_AI, err, sizeof(err), &s_cancel);
     s_warm_until_us = esp_timer_get_time() + (int64_t)WARM_HOLD_MS * 1000;
     if (ok) ai_log("warm: wifi + i2s ready; audio %d ms, wifi %d ms", (int)((t_i2s - t0) / 1000),
                    (int)((esp_timer_get_time() - t_i2s) / 1000));
@@ -2260,7 +2273,7 @@ static void session_start(void) {
     if (!open_audio()) { session_end("音频设备不可用"); return; }
     const int64_t t_i2s = esp_timer_get_time();
     if (s_cancel) { session_end(NULL); return; }
-    if (!media_net_acquire(err, sizeof(err), &s_cancel)) { session_end(s_cancel ? NULL : err); return; }
+    if (!media_net_acquire(MEDIA_NET_AI, err, sizeof(err), &s_cancel)) { session_end(s_cancel ? NULL : err); return; }
     ctl_step("start: uplink");
     open_uplink("start", NULL);  // 预热过就立即返回 / returns at once after a warm-up
     if (s_cancel) { session_end(NULL); return; }
@@ -2345,7 +2358,7 @@ static void check_rx_stall(void) {
     ws_lost();
 }
 
-static const char *const k_cmd_names[] = {"start", "stop", "toggle", "configure", "ws_end", "warm", "cool"};
+static const char *const k_cmd_names[] = {"start", "stop", "toggle", "event", "warm", "cool"};
 
 static void ctl_task(void *arg) {
     (void)arg;
@@ -2363,15 +2376,25 @@ static void ctl_task(void *arg) {
                 else if (s_st.state == AI_SPEAKING || atomic_load(&s_responding)) interrupt_reply();
                 else session_end(NULL);
                 break;
-            case CMD_CONFIGURE: send_session_update(); break;
-            // 一次断线会先后收到 ERROR 与 DISCONNECTED：已摘下连接就忽略后面的。
-            // One drop brings both ERROR and DISCONNECTED: once the client is detached, ignore the rest.
-            case CMD_WS_END: if (atomic_load(&s_session) && s_ws) ws_lost(); break;
+            case CMD_EVENT: break;  // 只是叫醒，下面处理 / just a wake-up, handled below
             case CMD_WARM: warm_up(); break;
             case CMD_COOL: warm_release("page closed"); break;
             }
             const int ms = (int)((esp_timer_get_time() - t0) / 1000);
             if (ms > CTL_SLOW_MS && cmd != CMD_START) ai_log("control: %s took %d ms", k_cmd_names[cmd], ms);
+            s_ctl_step = NULL;
+        }
+        // WebSocket 回调置下的事（见 post）。/ What the WebSocket callbacks flagged (see post).
+        if (atomic_exchange(&s_want_configure, false)) {
+            ctl_step("configure");
+            send_session_update();
+            s_ctl_step = NULL;
+        }
+        // 一次断线会先后报 ERROR 与 DISCONNECTED，两次置位合成一次；已摘下连接就忽略。
+        // One drop reports both ERROR and DISCONNECTED, merged into one flag; ignored once the client is detached.
+        if (atomic_exchange(&s_want_ws_end, false) && atomic_load(&s_session) && s_ws) {
+            ctl_step("ws_end");
+            ws_lost();
             s_ctl_step = NULL;
         }
         // 到点重连。/ Reconnect when due.
@@ -2415,21 +2438,22 @@ static void ctl_task(void *arg) {
             s_nudge_us = esp_timer_get_time();
             s_ctl_step = NULL;
         }
-        // 会话结束时旧连接还在收尾：等它退出再收回 WiFi。超过 RELEASE_WAIT_MS 还不退出就放弃等待、
-        // WiFi 留着（下次联网或关机时再收），宁可多耗点电也不在它还压着接收缓冲时卸载驱动。
+        // 会话结束时旧连接还在收尾：等它退出再收回 WiFi。超过 RELEASE_WAIT_MS 还不退出就放弃等待：放手但
+        // WiFi 留着（下一位使用方收网或关机时再收），宁可多耗点电也不在它还压着接收缓冲时卸载驱动。
         // The chat ended while an old connection was still shutting down: release WiFi once it exits. If it
-        // has not exited after RELEASE_WAIT_MS, stop waiting and leave WiFi up (released on the next network
-        // use or power-off): a little battery beats unloading the driver while it still holds receive buffers.
+        // has not exited after RELEASE_WAIT_MS, stop waiting and let go while leaving WiFi up (released by
+        // the next client's release or power-off): a little battery beats unloading the driver while it
+        // still holds receive buffers.
         if (atomic_load(&s_release_pending) && !atomic_load(&s_session)) {
             const int ms = (int)((esp_timer_get_time() - s_release_pending_us) / 1000);
             if (atomic_load(&s_reapers) == 0) {
                 ai_log("old connection's task exited after %d ms; releasing network", ms);
-                release_network();
-                log_flush();
+                release_network();  // 已先写好日志 / writes the log first
             } else if (ms > RELEASE_WAIT_MS) {
                 atomic_store(&s_release_pending, false);
                 ai_log("old connection's task still running after %d ms; WiFi left on", ms);
                 log_flush();
+                media_net_forget(MEDIA_NET_AI);
             }
         }
         // 空闲超时：没人说话、也没在回答。/ Idle timeout: no speech and no reply.
@@ -2441,17 +2465,8 @@ static void ctl_task(void *arg) {
         }
         if (atomic_load(&s_warm) && !atomic_load(&s_session) && esp_timer_get_time() >= s_warm_until_us)
             warm_release("idle for 90 s");
-        // 对话结束时工作任务没退出、I2S 因此留着：它们一退出就关。/ The chat ended with workers still alive, so
-        // I2S was kept: close it as soon as they exit.
-        if (atomic_load(&s_audio_open) && !atomic_load(&s_session) && !atomic_load(&s_warm) &&
-            atomic_load(&s_workers) == 0 && atomic_load(&s_handlers) == 0) {
-            ctl_step("deferred i2s close");
-            release_i2s("deferred i2s close");
-            ai_log("workers exited; i2s released");
-            s_ctl_step = NULL;
-        }
         if (!atomic_load(&s_session) && !atomic_load(&s_release_pending) && !atomic_load(&s_warm) &&
-            !atomic_load(&s_audio_open)) {
+            metalio_audio_owner() != METALIO_AUDIO_OWNER_AI) {
             taskENTER_CRITICAL(&s_mux);
             const bool done = uxQueueMessagesWaiting(s_cmds) == 0;
             if (done) s_ctl = NULL;
@@ -2577,9 +2592,3 @@ bool ai_audio_busy(void) {
 
 bool ai_active(void) { return atomic_load(&s_session) || s_st.state != AI_IDLE; }
 
-bool ai_net_busy(void) { return atomic_load(&s_reapers) > 0; }
-
-bool ai_fully_released(void) {
-    return !ai_active() && !atomic_load(&s_tearing_down) && !atomic_load(&s_warming) && !atomic_load(&s_warm) &&
-           !atomic_load(&s_release_pending) && !atomic_load(&s_audio_open) && !ai_net_busy();
-}

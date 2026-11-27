@@ -24,6 +24,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "freertos/idf_additions.h"
@@ -69,10 +70,17 @@ static bool s_tx32;                     // 发送用 32 位数据（与麦克风
 // chunks, so close waits at most one chunk's wait time as given by the caller.
 static _Atomic int s_io_users;
 static _Atomic bool s_io_closing;
+// 归属：只在持 s_i2s_lock 时改；EV_FREE 与“没人占用”同步，也只在持锁时置/清，等着占用的一方据此醒来。
+// Ownership: changed only under s_i2s_lock. EV_FREE mirrors "nobody holds it", is set and cleared under
+// the lock too, and wakes a waiting claimant.
+static _Atomic metalio_audio_owner_t s_owner = METALIO_AUDIO_OWNER_NONE;
+static EventGroupHandle_t s_owner_events;
+static StaticEventGroup_t s_owner_events_storage;
+#define EV_FREE BIT0
 
-static bool io_enter(void) {
+static bool io_enter(metalio_audio_owner_t owner) {
     atomic_fetch_add(&s_io_users, 1);
-    if (!atomic_load(&s_io_closing)) return true;
+    if (!atomic_load(&s_io_closing) && atomic_load(&s_owner) == owner) return true;
     atomic_fetch_sub(&s_io_users, 1);
     return false;
 }
@@ -215,6 +223,8 @@ esp_err_t metalio_audio_init(void) {
     if (s_at_lock) return ESP_OK;
     s_at_lock = xSemaphoreCreateMutex();
     s_i2s_lock = xSemaphoreCreateMutex();
+    s_owner_events = xEventGroupCreateStatic(&s_owner_events_storage);
+    xEventGroupSetBits(s_owner_events, EV_FREE);
     // 搬运缓冲放 PSRAM，内部 RAM 留给 I2S DMA、Wi-Fi 与 USB。
     // Staging buffers live in PSRAM; internal RAM is kept for I2S DMA, Wi-Fi and USB.
     s_txbuf = heap_caps_malloc(CHUNK_FRAMES * 2 * sizeof(int32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -340,11 +350,11 @@ static void std_config(i2s_std_config_t *std, int sample_rate, i2s_data_bit_widt
 #endif
 }
 
-esp_err_t metalio_audio_open(int sample_rate, bool capture) {
-    if (!metalio_audio_wait_ready(5000)) return ESP_ERR_INVALID_STATE;
-    if (xSemaphoreTake(s_i2s_lock, pdMS_TO_TICKS(1000)) != pdTRUE) return ESP_ERR_TIMEOUT;
+// 按要求打开 I2S，已这样开着就不动。持 s_i2s_lock 时调用。/ Open I2S as asked, untouched when already open
+// that way. Call holding s_i2s_lock.
+static esp_err_t open_locked(int sample_rate, bool capture) {
     esp_err_t err = ESP_OK;
-    if (s_tx && s_rate == sample_rate && (s_capture || !capture)) goto done;
+    if (s_tx && s_rate == sample_rate && (s_capture || !capture)) return ESP_OK;
     // 重开期间（含测时钟，它也用发送缓冲）不许读写。/ No I/O while reopening (the clock measurement uses the TX buffer too).
     io_quiesce();
     close_locked();
@@ -391,26 +401,76 @@ esp_err_t metalio_audio_open(int sample_rate, bool capture) {
         s_actual_rate = measure_rate_locked();
     } else close_locked();
 done:
-    io_resume();  // 快路径上本来就没挡读写，复位无副作用 / a no-op on the fast path, where I/O was never blocked
+    io_resume();
+    return err;
+}
+
+esp_err_t metalio_audio_claim(metalio_audio_owner_t owner, int sample_rate, bool capture, int wait_ms) {
+    if (owner == METALIO_AUDIO_OWNER_NONE) return ESP_ERR_INVALID_ARG;
+    if (!s_i2s_lock || !s_owner_events) return ESP_ERR_INVALID_STATE;
+    if (!metalio_audio_wait_ready(5000)) return ESP_ERR_INVALID_STATE;
+    const TickType_t start = xTaskGetTickCount();
+    const TickType_t limit = wait_ms > 0 ? pdMS_TO_TICKS(wait_ms) : 0;
+    for (;;) {
+        // 锁只在开关通道时被占，从不无限期：等不到算失败，不算“别人占着”。
+        // The lock is only held while opening or closing, never indefinitely: failing to get it is a
+        // failure, not "someone else holds it".
+        if (xSemaphoreTake(s_i2s_lock, pdMS_TO_TICKS(1000)) != pdTRUE) return ESP_FAIL;
+        const metalio_audio_owner_t holder = atomic_load(&s_owner);
+        if (holder == METALIO_AUDIO_OWNER_NONE || holder == owner) break;  // 带着锁出去 / leave holding the lock
+        xSemaphoreGive(s_i2s_lock);
+        const TickType_t waited = xTaskGetTickCount() - start;
+        if (waited >= limit) {
+            ESP_LOGI(TAG, "claim by %d: still held by %d", (int)owner, (int)holder);
+            return ESP_ERR_TIMEOUT;
+        }
+        // 放手时在锁内置位：醒来后回到上面持锁重查，被别人抢先就接着等。
+        // The release sets the bit under the lock: recheck above holding it, and wait again if someone else won.
+        (void)xEventGroupWaitBits(s_owner_events, EV_FREE, pdFALSE, pdTRUE, limit - waited);
+    }
+    atomic_store(&s_owner, owner);
+    xEventGroupClearBits(s_owner_events, EV_FREE);
+    const esp_err_t err = open_locked(sample_rate, capture);
+    if (err != ESP_OK) {
+        // 没开成就不占着，免得别人白等。/ Not opened: do not keep the claim, or others would wait for nothing.
+        metalio_audio_set_pa(false);
+        atomic_store(&s_owner, METALIO_AUDIO_OWNER_NONE);
+        xEventGroupSetBits(s_owner_events, EV_FREE);
+    }
     xSemaphoreGive(s_i2s_lock);
-    ESP_LOGI(TAG, "i2s open %d Hz capture=%d: %s", sample_rate, capture, esp_err_to_name(err));
+    ESP_LOGI(TAG, "i2s claim by %d, %d Hz capture=%d: %s", (int)owner, sample_rate, capture, esp_err_to_name(err));
     log_heap("i2s after");
     return err;
 }
 
-void metalio_audio_close(void) {
+void metalio_audio_release(metalio_audio_owner_t owner) {
+    if (owner == METALIO_AUDIO_OWNER_NONE || !s_i2s_lock || atomic_load(&s_owner) != owner) return;
     metalio_audio_set_pa(false);
-    if (!s_i2s_lock) return;
     xSemaphoreTake(s_i2s_lock, portMAX_DELAY);
+    if (atomic_load(&s_owner) != owner) {  // 同一归属者的另一个任务已放手 / another task of this owner let go first
+        xSemaphoreGive(s_i2s_lock);
+        return;
+    }
     io_quiesce();  // 正在读写的最多再用一块的等待时间 / I/O in progress takes one chunk's wait at most
     close_locked();
+    atomic_store(&s_owner, METALIO_AUDIO_OWNER_NONE);  // 之后这一方的读写都返回 -1 / its I/O gets -1 from here on
     io_resume();
-    xSemaphoreGive(s_i2s_lock);
     // 关之前最后一次写入可能又开了功放；通道已关，再关一次就不会再被打开。/ A last write before the close
     // may have turned the amplifier back on; with the channel gone, switching it off now sticks.
     metalio_audio_set_pa(false);
+    xEventGroupSetBits(s_owner_events, EV_FREE);
+    xSemaphoreGive(s_i2s_lock);
+    ESP_LOGI(TAG, "i2s released by %d", (int)owner);
     // BH 保持模式 1（共享电源不断），只释放串口驱动。/ The BH stays in mode 1 (shared rail on); only the UART driver goes.
     uart_down();
+}
+
+metalio_audio_owner_t metalio_audio_owner(void) { return atomic_load(&s_owner); }
+
+bool metalio_audio_wait_free(int wait_ms) {
+    if (!s_owner_events) return true;
+    const TickType_t ticks = wait_ms > 0 ? pdMS_TO_TICKS(wait_ms) : 0;
+    return (xEventGroupWaitBits(s_owner_events, EV_FREE, pdFALSE, pdTRUE, ticks) & EV_FREE) != 0;
 }
 
 int metalio_audio_sample_rate(void) { return s_rate; }
@@ -427,8 +487,8 @@ void metalio_audio_set_pa(bool on) {
     if (metalio_io_set(IO_PA_EN, on) == ESP_OK) s_pa_on = on;
 }
 
-int metalio_audio_write(const int16_t *mono, size_t samples, TickType_t wait) {
-    if (!mono || !io_enter()) return -1;
+int metalio_audio_write(metalio_audio_owner_t owner, const int16_t *mono, size_t samples, TickType_t wait) {
+    if (!mono || !io_enter(owner)) return -1;
     i2s_chan_handle_t tx = s_tx;
     if (!tx) { io_leave(); return -1; }
     metalio_audio_set_pa(true);
@@ -460,8 +520,8 @@ int metalio_audio_write(const int16_t *mono, size_t samples, TickType_t wait) {
     return (int)done;
 }
 
-int metalio_audio_read(int16_t *mono, size_t samples, TickType_t wait) {
-    if (!mono || !io_enter()) return -1;
+int metalio_audio_read(metalio_audio_owner_t owner, int16_t *mono, size_t samples, TickType_t wait) {
+    if (!mono || !io_enter(owner)) return -1;
     i2s_chan_handle_t rx = s_rx;
     if (!rx) { io_leave(); return -1; }
     size_t done = 0;
@@ -486,8 +546,8 @@ int metalio_audio_read(int16_t *mono, size_t samples, TickType_t wait) {
 // ---------------------------------------------------------------- self-test
 
 void metalio_audio_selftest(void) {
-    if (metalio_audio_open(DEFAULT_RATE, true) != ESP_OK) {
-        ESP_LOGE(TAG, "selftest: audio not available (state=%d)", (int)s_state);
+    if (metalio_audio_claim(METALIO_AUDIO_OWNER_SELFTEST, DEFAULT_RATE, true, 0) != ESP_OK) {
+        ESP_LOGE(TAG, "selftest: audio not available (state=%d, owner=%d)", (int)s_state, (int)atomic_load(&s_owner));
         return;
     }
     // 1 kHz，0.6 s。/ 1 kHz for 0.6 s.
@@ -497,7 +557,7 @@ void metalio_audio_selftest(void) {
     for (int sent = 0; sent < total; sent += CHUNK_FRAMES) {
         for (int i = 0; i < CHUNK_FRAMES; ++i, ++phase)
             tone[i] = (int16_t)(12000 * sinf(2.0f * (float)M_PI * 1000.0f * phase / DEFAULT_RATE));
-        metalio_audio_write(tone, CHUNK_FRAMES, pdMS_TO_TICKS(200));
+        metalio_audio_write(METALIO_AUDIO_OWNER_SELFTEST, tone, CHUNK_FRAMES, pdMS_TO_TICKS(200));
     }
     // 记录 1 s 麦克风两槽电平，确认麦克风在哪个槽。
     // Log 1 s of mic level for both slots to confirm which slot carries the mic.
@@ -516,7 +576,7 @@ void metalio_audio_selftest(void) {
             ++frames;
         }
     }
-    metalio_audio_close();
+    metalio_audio_release(METALIO_AUDIO_OWNER_SELFTEST);
     log_heap("i2s closed");
     ESP_LOGI(TAG, "selftest mic frames=%d L rms=%.0f peak=%d | R rms=%.0f peak=%d", frames,
              frames ? sqrt(sum_l / frames) : 0, peak_l, frames ? sqrt(sum_r / frames) : 0, peak_r);

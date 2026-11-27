@@ -36,7 +36,6 @@ const app_desc_t app_ai = {.title="ai"};
 const app_desc_t *g_apps_origin;
 bool ai_active(void){return false;}
 bool ai_audio_busy(void){return false;}
-bool ai_net_busy(void){return false;}
 bool ai_warm_held(void){return false;}
 void ai_start(void){}
 void ai_toggle(void){}

@@ -343,6 +343,20 @@ def main():
     print(f'examples {sum(1 for w in words if w[5])}/{len(words)}, forms {sum(1 for w in words if w[4])}',
           file=sys.stderr)
 
+    # 进度按词头的 32 位 FNV-1a 哈希存（vocab_book.c），两个词头撞哈希会共用一条进度：生成时就拒绝。
+    # Progress is keyed by the headword's 32-bit FNV-1a hash (vocab_book.c); two colliding headwords would
+    # share one record, so refuse them here.
+    def fnv(text):
+        h = 2166136261
+        for c in text.encode():
+            h = ((h ^ c) * 16777619) & 0xffffffff
+        return h
+    seen_hash = {}
+    for fields in words:
+        other = seen_hash.setdefault(fnv(fields[0]), fields[0])
+        if other != fields[0]:
+            sys.exit(f'headword hash collision: {other!r} / {fields[0]!r}')
+
     # 打包 / Pack.
     strings = bytearray()
     pool = {}

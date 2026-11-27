@@ -1578,10 +1578,10 @@ void app_loop_run(const app_loop_config_t* config) {
         uint32_t ble_input = ble_pt_input_serial();
         if (ble_input != last_ble_input) { last_ble_input = ble_input; last_input_ms = ctx.now_ms; }
         unsigned requested_idle = app_settings_auto_lock_minutes();
-        // 播放音乐时不自动锁屏（锁屏会停掉 WiFi 与 I2S）；暂停不算，否则暂停后放下就永不锁屏。
-        // No idle lock while music plays (locking stops WiFi and I2S); a pause does not count, or a paused
-        // device put down would never lock.
-        bool idle_blocked = app_sd_recovery_busy() || usb_storage_active() || app_download_active() || wifi_busy || music_playing() || ai_active() || ai_net_busy() || ai_warm_held() || current == &app_transfer ||
+        // 播放音乐、AI 对话或预热时不自动锁屏（锁屏会停掉 WiFi 与 I2S）；音乐暂停不算，否则暂停后放下就永不锁屏。
+        // No idle lock while music plays or an AI chat or warm-up runs (locking stops WiFi and I2S); a music
+        // pause does not count, or a paused device put down would never lock.
+        bool idle_blocked = app_sd_recovery_busy() || usb_storage_active() || app_download_active() || wifi_busy || music_playing() || ai_active() || ai_warm_held() || current == &app_transfer ||
             current->holds_pmu || power_dialog_open || touch.touched ||
             ctx.request_app || ctx.request_menu || ctx.request_return;
         if (idle_blocked || requested_idle != idle_minutes) last_input_ms = ctx.now_ms;

@@ -30,7 +30,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "ai_voice.h"
 #include "cJSON.h"
 #include "esp_attr.h"
 #include "esp_crt_bundle.h"
@@ -105,7 +104,16 @@ typedef struct {
 // 开播时 AI 还没放开音频（刚离开 AI 页、对话还在收尾），最多等这么久。
 // How long a new track waits for the AI to let go of audio (just left the AI page, chat still ending).
 #define AI_AUDIO_WAIT_MS 6000
+// 别的使用者（AI）占着音频时的提示。/ Shown while another user (the AI) holds audio.
+#define AUDIO_BUSY_MSG "AI 助手正在使用音频"
+// 音乐放下网络后再断 WiFi 前，最多等其他使用方（AI 的旧连接）放手这么久。
+// Before dropping WiFi to fit I2S, wait this long at most for another client (the AI's old connection) to let go.
+#define NET_DROP_WAIT_MS 25000
 static _Atomic bool s_page_open;
+// 进入 U 盘模式等需要立即收回网络：联网任务空闲时不等保留期，马上退出。新请求会清掉它。
+// The network must be released now (entering USB drive mode, say): the idle network task exits at once
+// instead of waiting out its hold. A new request clears it.
+static _Atomic bool s_net_quit;
 static _Atomic int64_t s_last_req_us;
 
 static SemaphoreHandle_t s_lock;
@@ -127,10 +135,6 @@ static struct {
     char stream_id[MUSIC_QUERY_MAX];
 } s_pend;
 static QueueHandle_t s_wake_q;
-// 联网任务创建失败时，记下这一代没人去下载，解码任务据此停止而不是一直缓冲。
-// When the network task could not be created, this generation has no downloader; the decoder stops
-// instead of buffering forever.
-static _Atomic uint32_t s_net_fail_gen;
 static StreamBufferHandle_t s_ring;
 static music_track_t *s_list, *s_queue;
 // 状态放 PSRAM（只在任务上下文访问），初值在 music_init 里设。/ Status lives in PSRAM (task context only); music_init sets its initial values.
@@ -157,10 +161,6 @@ static bool s_resample, s_output_failed;
 static int s_skips;  // 连续因无版权等原因跳过的曲目 / consecutive tracks skipped as unavailable
 static int s_write_fails;  // 连续写 I2S 失败 / consecutive failed I2S writes
 static int64_t s_paused_us;  // 进入暂停的时刻 / when playback was paused
-
-// AI 正在用或预热着音频（麦克风+喇叭）：音乐不能接手或打开 I2S。
-// The AI is using or holding audio warm (mic + speaker): music must not adopt or open I2S.
-static bool ai_holds_audio(void) { return ai_active() || ai_warm_held(); }  // ai_audio_busy 蕴含 ai_active / implied by ai_active
 
 // ---------------------------------------------------------------- status helpers
 
@@ -265,7 +265,7 @@ static void load_list(const net_req_t *req_in) {
             snprintf(path, sizeof(path), "%s?limit=%d&offset=%d", paths[req->source], MUSIC_PAGE_SIZE, req->offset);
         }
         char *body = NULL;
-        if (media_net_acquire(err, sizeof(err), NULL)) {
+        if (media_net_acquire(MEDIA_NET_MUSIC, err, sizeof(err), NULL)) {
             open_uplink();
             body = api_get(path, err, sizeof(err));
         }
@@ -321,23 +321,11 @@ static void dl_finish(uint32_t gen, const char *err, bool fatal) {
     atomic_store(&s_eof_gen, gen);
 }
 
-// 停播后联网任务若刚替这一代打开了 I2S，就关掉；音乐又在播或 AI 在用时不碰。
-// If the network task just opened I2S for a generation that was then stopped, close it; leave it alone
-// while music plays again or the AI uses it.
-static void close_if_abandoned(void) {
-    if (!music_active() && !ai_holds_audio() && metalio_audio_is_open()) {
-        ESP_LOGI(TAG, "closing I2S opened for a stopped track");
-        metalio_audio_close();
-    }
-}
-
-// 等 AI 放开音频（对话收尾、预热收回），最多 AI_AUDIO_WAIT_MS；期间换歌就放弃。返回 AI 是否已放开。
-// Wait up to AI_AUDIO_WAIT_MS for the AI to let go of audio (chat ending, warm-up released); give up if
-// the track changes. Returns whether the AI let go.
-static bool wait_ai_audio_free(uint32_t gen) {
-    for (int waited = 0; ai_holds_audio() && gen_current(gen) && waited < AI_AUDIO_WAIT_MS; waited += 100)
-        vTaskDelay(pdMS_TO_TICKS(100));
-    return !ai_holds_audio();
+// 停播后联网任务若刚替这一代占了 I2S，就放手；音乐又在播时留着（放手对别人占着的不起作用）。
+// If the network task just claimed I2S for a generation that was then stopped, let it go; keep it while
+// music plays again (releasing does nothing to a claim someone else holds).
+static void release_if_abandoned(void) {
+    if (!music_active()) metalio_audio_release(METALIO_AUDIO_OWNER_MUSIC);
 }
 
 // 取出待办。list_only 时只取列表（下载间隙用）。/ Take pending work; list_only takes lists only (between chunks).
@@ -466,35 +454,36 @@ static void stream_track(const net_req_t *req) {
     atomic_store(&s_content_length, 0);
     atomic_store(&s_ready_gen, gen);
     char err[64] = {0}, path[MUSIC_QUERY_MAX + 16];
-    if (!media_net_acquire(err, sizeof(err), NULL)) { dl_finish(gen, err, false); return; }
+    if (!media_net_acquire(MEDIA_NET_MUSIC, err, sizeof(err), NULL)) { dl_finish(gen, err, false); return; }
     // 连 WiFi 可能要几十秒：期间停了或换了歌就不再开 I2S。/ Joining WiFi can take tens of seconds: no I2S if the track was stopped or changed meanwhile.
-    if (!gen_current(gen)) return;
-    // AI 占着音频时不接手也不打开 I2S，等它放开；等不到就停止（换下一首也一样）。
-    // While the AI holds audio, neither adopt nor open I2S: wait for it to let go, else stop (skipping would not help).
-    if (!wait_ai_audio_free(gen)) { dl_finish(gen, "AI 助手正在使用音频", true); return; }
     if (!gen_current(gen)) return;
     // I2S 的 DMA 缓冲只能在内部 RAM。WiFi 要约 28 KB，先开 I2S 会让 WiFi 起不来；而 WiFi 刚连上、
     // 还没开始下载时，碎片里仍放得下 I2S 的几小块缓冲。所以连上网就立刻占住 I2S，再开始下载。
-    // 万一仍分不到，就断网、先开 I2S、再重连。
+    // AI 占着音频（对话收尾、预热）时等它放手；等不到就停止（换下一首也一样）。分不到内存时断网、先开 I2S、再重连。
     // I2S DMA buffers must be internal RAM. WiFi needs ~28 KB, so opening I2S first starves WiFi; right
     // after WiFi connects, before any download, the small I2S buffers still fit. Claim I2S then, before
-    // streaming; failing that, drop WiFi, open I2S first and reconnect.
-    if (!metalio_audio_is_open() && metalio_audio_open(AUDIO_RATE, false) != ESP_OK) {
+    // streaming. While the AI holds audio (a chat ending, the warm-up) wait for it to let go, else stop
+    // (skipping would not help). If it does not fit, drop WiFi, open I2S first and reconnect.
+    esp_err_t claimed = metalio_audio_claim(METALIO_AUDIO_OWNER_MUSIC, AUDIO_RATE, false, AI_AUDIO_WAIT_MS);
+    if (claimed == ESP_ERR_TIMEOUT) { dl_finish(gen, AUDIO_BUSY_MSG, true); return; }
+    if (!gen_current(gen)) { release_if_abandoned(); return; }
+    if (claimed != ESP_OK) {
         ESP_LOGW(TAG, "I2S did not fit beside WiFi; reconnecting after claiming it");
-        media_net_drop();
-        if (metalio_audio_open(AUDIO_RATE, false) != ESP_OK) { dl_finish(gen, "音频设备不可用", true); return; }
-        if (!media_net_acquire(err, sizeof(err), NULL)) { dl_finish(gen, err, false); return; }
+        media_net_drop(MEDIA_NET_MUSIC, NET_DROP_WAIT_MS);
+        claimed = metalio_audio_claim(METALIO_AUDIO_OWNER_MUSIC, AUDIO_RATE, false, 0);
+        if (claimed != ESP_OK) { dl_finish(gen, claimed == ESP_ERR_TIMEOUT ? AUDIO_BUSY_MSG : "音频设备不可用", true); return; }
+        if (!media_net_acquire(MEDIA_NET_MUSIC, err, sizeof(err), NULL)) { dl_finish(gen, err, false); return; }
     }
-    if (!gen_current(gen)) { close_if_abandoned(); return; }
+    if (!gen_current(gen)) { release_if_abandoned(); return; }
     open_uplink();  // 预热过就立即返回 / returns at once after a warm-up
-    if (!gen_current(gen)) { close_if_abandoned(); return; }
+    if (!gen_current(gen)) { release_if_abandoned(); return; }
     snprintf(path, sizeof(path), "/url?id=%s", req->text);
     char *body = api_get(path, err, sizeof(err));
     cJSON *root = body ? cJSON_Parse(body) : NULL;
     if (body) heap_caps_free(body);
     const char *url = root ? cJSON_GetStringValue(cJSON_GetObjectItem(root, "url")) : NULL;
     if (!gen_current(gen)) {
-        close_if_abandoned();
+        release_if_abandoned();
     } else if (!url) {
         dl_finish(gen, err[0] ? err : "无版权或需要会员", false);
     } else {
@@ -513,14 +502,17 @@ static void net_task(void *arg) {
     for (;;) {
         if (!take_job(&req, false)) {
             uint8_t token;
-            if (xQueueReceive(s_wake_q, &token, pdMS_TO_TICKS(NET_POLL_MS)) == pdTRUE) continue;
-            // 空闲：没在播放（暂停不算）、也过了保留时间就收回网络并退出，把内部 RAM 还回去。
+            const bool woken = xQueueReceive(s_wake_q, &token, pdMS_TO_TICKS(NET_POLL_MS)) == pdTRUE;
+            const bool quit_now = atomic_load(&s_net_quit);
+            if (woken && !quit_now) continue;
+            // 空闲：没在播放（暂停不算）、也过了保留时间（或要求立即收回）就收回网络并退出，把内部 RAM 还回去。
             // 暂停时缓冲里还有歌，留着缓冲，只收网络。
-            // Idle: when not playing (paused does not count) and past the hold, release the network and exit
-            // to return the internal RAM. While paused the ring still holds the song: keep it, drop only the network.
+            // Idle: when not playing (paused does not count) and past the hold (or asked to release now),
+            // release the network and exit to return the internal RAM. While paused the ring still holds
+            // the song: keep it, drop only the network.
             if (music_playing()) continue;
             const int64_t idle_ms = (esp_timer_get_time() - atomic_load(&s_last_req_us)) / 1000;
-            if (idle_ms < (atomic_load(&s_page_open) ? NET_HOLD_MS : NET_IDLE_MS)) continue;
+            if (!quit_now && idle_ms < (atomic_load(&s_page_open) ? NET_HOLD_MS : NET_IDLE_MS)) continue;
             StreamBufferHandle_t ring = NULL;
             taskENTER_CRITICAL(&s_net_mux);
             const bool quit = !net_pending_locked() && !music_playing();
@@ -533,7 +525,8 @@ static void net_task(void *arg) {
             // 解码任务已停，不再读它；不用 IDF 6.1 有缺陷的 WithCaps 删除（见 psram_stream.h）。
             // The decoder has stopped reading it; avoids the faulty IDF 6.1 WithCaps delete (see psram_stream.h).
             if (ring) psram_stream_delete(ring);
-            media_net_release_if_unused();
+            media_net_release(MEDIA_NET_MUSIC);
+            atomic_store(&s_net_quit, false);
             ESP_LOGI(TAG, "network task exits");
             vTaskDeleteWithCaps(NULL);
         }
@@ -541,7 +534,7 @@ static void net_task(void *arg) {
             // 打开音乐页：先连上 WiFi 并打通上行，点歌时直接开始。/ Music page opened: join WiFi and open the uplink now, so a song starts at once.
             char err[64] = {0};
             const int64_t t0 = esp_timer_get_time();
-            if (media_net_acquire(err, sizeof(err), NULL)) {
+            if (media_net_acquire(MEDIA_NET_MUSIC, err, sizeof(err), NULL)) {
                 open_uplink();
                 ESP_LOGI(TAG, "warm: network ready in %d ms", (int)((esp_timer_get_time() - t0) / 1000));
             } else {
@@ -549,17 +542,19 @@ static void net_task(void *arg) {
             }
         } else if (req.type == NET_LIST) {
             load_list(&req);
-            // 不在这里收网：联网任务在期间算作占用，空闲退出时再收（见 music_net_busy）。
-            // No release here: the network counts as in use while this task lives; it is released when the task exits idle.
+            // 不在这里收网：联网任务活着就占着网络，空闲退出时再放手（见上）。
+            // No release here: this task holds the network while it lives and lets go when it exits idle (see above).
         } else {
             stream_track(&req);
         }
     }
 }
 
-// 联网任务没能创建：清掉待办，列表报错、这一代播放交给解码任务停止，不让“加载中”“缓冲中”卡住。
-// The network task could not be created: clear the pending work, fail the list, and let the decoder stop
-// this generation, so neither "loading" nor "buffering" gets stuck.
+// 联网任务没能创建：清掉待办，列表报错；这一代播放直接按“下载结束、无法继续”交给解码任务停止，
+// 不让“加载中”“缓冲中”卡住。
+// The network task could not be created: clear the pending work and fail the list; this generation's
+// download is finished as fatal, so the decoder's usual end-of-stream path stops it, and neither
+// "loading" nor "buffering" gets stuck.
 static void net_start_failed(void) {
     net_req_t list = {0};
     taskENTER_CRITICAL(&s_net_mux);
@@ -570,7 +565,16 @@ static void net_start_failed(void) {
     s_pend.list = s_pend.warm = false;
     s_pend.stream_gen = 0;
     taskEXIT_CRITICAL(&s_net_mux);
-    if (gen) atomic_store(&s_net_fail_gen, gen);
+    if (gen) {
+        // 有待播的一代只可能来自 start_track，也就在解码任务里：此刻没人读写环形缓冲，可以清掉上一首的残余，
+        // 免得把它当这一代播出来。/ A pending generation can only come from start_track, so this runs on the
+        // decoder task: nobody reads or writes the ring now, so drop the last track's leftovers rather than
+        // play them as this generation.
+        if (s_ring) (void)xStreamBufferReset(s_ring);
+        atomic_store(&s_content_length, 0);
+        atomic_store(&s_ready_gen, gen);
+        dl_finish(gen, "内存不足，无法联网", true);
+    }
     if (had_list) {
         lock();
         if (list_is_current(&list)) {
@@ -586,6 +590,7 @@ static void net_start_failed(void) {
 // (handled as above).
 static bool net_post(const net_req_t *req) {
     atomic_store(&s_last_req_us, esp_timer_get_time());
+    atomic_store(&s_net_quit, false);
     taskENTER_CRITICAL(&s_net_mux);
     if (req->type == NET_LIST) {
         s_pend.list_req = *req;
@@ -632,14 +637,10 @@ static bool prepare_output(int hz) {
     // BH1098G 时钟固定 16 kHz，所有文件都重采样到它。I2S 通常已由联网任务在开 WiFi 前打开。
     // The BH1098G clock is fixed at 16 kHz and every file is resampled to it. The network task
     // normally opened I2S before starting WiFi.
-    // AI 占着音频时不打开、也不接手它的 I2S（它随时会关掉）。/ Never open or adopt the AI's I2S (it may close it any time).
-    if (ai_holds_audio()) {
-        set_error("AI 助手正在使用音频");
-        s_output_failed = true;
-        return false;
-    }
-    if (metalio_audio_open(AUDIO_RATE, false) != ESP_OK) {
-        set_error("音频设备不可用");
+    // 别人（AI）占着就不等：它放手前音乐不能出声。/ No waiting while someone else (the AI) holds it: music cannot sound until it lets go.
+    const esp_err_t claimed = metalio_audio_claim(METALIO_AUDIO_OWNER_MUSIC, AUDIO_RATE, false, 0);
+    if (claimed != ESP_OK) {
+        set_error(claimed == ESP_ERR_TIMEOUT ? AUDIO_BUSY_MSG : "音频设备不可用");
         s_output_failed = true;
         return false;
     }
@@ -686,8 +687,6 @@ typedef enum { FRAME_OK, FRAME_WAIT, FRAME_END, FRAME_FAIL } frame_result_t;
 static frame_result_t play_frame(void) {
     const uint32_t gen = atomic_load(&s_gen);
     if (atomic_load(&s_ready_gen) != gen) {
-        // 联网任务没建起来，这一代没人下载：停止而不是一直缓冲。/ No network task for this generation: stop instead of buffering forever.
-        if (atomic_load(&s_net_fail_gen) == gen) { set_error("内存不足，无法联网"); return FRAME_FAIL; }
         vTaskDelay(pdMS_TO_TICKS(20));
         return FRAME_WAIT;
     }
@@ -721,9 +720,10 @@ static frame_result_t play_frame(void) {
     const int16_t *out = s_pcm;
     int n = samples;
     if (s_resample) { n = resample(s_pcm, samples, s_out); out = s_out; }
-    if (metalio_audio_write(out, (size_t)n, pdMS_TO_TICKS(500)) < 0) {
-        // 输出通道没了（被别处关掉）：丢掉这一帧，下一帧重新打开；连续失败就停止。
-        // The output channel is gone (closed elsewhere): drop this frame and reopen on the next; stop if it keeps failing.
+    if (metalio_audio_write(METALIO_AUDIO_OWNER_MUSIC, out, (size_t)n, pdMS_TO_TICKS(500)) < 0) {
+        // 不再归音乐（已放手或被 AI 占走）或通道出错：丢掉这一帧，下一帧重新占用；占不到或连续失败就停止。
+        // No longer music's (let go, or taken by the AI) or the channel failed: drop this frame and claim
+        // again on the next; stop if that fails or it keeps failing.
         s_out_rate = 0;
         if (++s_write_fails >= 3) { set_error("音频设备不可用"); return FRAME_FAIL; }
         return FRAME_WAIT;
@@ -795,16 +795,15 @@ static void start_track(int index) {
         set_state(MUSIC_STOPPED);
         return;
     }
-    // 投递失败（联网任务建不起来）时 play_frame 看到 s_net_fail_gen 就停止。/ If posting fails, play_frame sees s_net_fail_gen and stops.
+    // 投递失败（联网任务建不起来）时 net_start_failed 已把这一代按无法继续结束。/ If posting fails,
+    // net_start_failed has already finished this generation as fatal.
     (void)net_post(&req);
 }
 
 static void stop_playback(void) {
     atomic_fetch_add(&s_gen, 1);  // 下载任务放弃当前流 / the downloader abandons its stream
-    // AI 正在用或马上要用音频（开始对话时先停音乐）时不碰 I2S 和功放：它会自己按需重开。
-    // Leave I2S and the amplifier alone while the AI uses or is about to use audio (starting a chat stops
-    // music first): it reopens I2S as it needs.
-    if (!ai_holds_audio()) metalio_audio_close();
+    // 只放音乐自己占着的：AI 占着时这不起作用。/ Lets go only of music's own claim: no effect while the AI holds it.
+    metalio_audio_release(METALIO_AUDIO_OWNER_MUSIC);
     s_out_rate = 0;
     s_write_fails = 0;
     set_state(MUSIC_STOPPED);
@@ -993,6 +992,14 @@ void music_next(void) { post(CMD_NEXT, 0, false); }
 void music_prev(void) { post(CMD_PREV, 0, false); }
 void music_stop(void) { post(CMD_STOP, 0, true); }
 
+void music_shutdown(void) {
+    if (music_active()) music_stop();
+    atomic_store(&s_net_quit, true);
+    if (!s_wake_q) return;
+    const uint8_t token = 0;
+    xQueueOverwrite(s_wake_q, &token);  // 叫醒空闲的联网任务 / wake the idle network task
+}
+
 void music_set_volume(int volume) {
     metalio_audio_set_volume(volume);
     if (!s_lock) return;
@@ -1018,11 +1025,3 @@ void music_get_status(music_status_t *out) {
 
 bool music_active(void) { return s_st.state != MUSIC_STOPPED; }
 bool music_playing(void) { return s_st.state == MUSIC_PLAYING || s_st.state == MUSIC_BUFFERING; }
-bool music_net_busy(void) {
-    // 联网任务还在（含音乐页开着时的保留期）也算占用，免得 AI 结束时把预热好的 WiFi 收掉。暂停本身不占网络：
-    // 暂停时联网任务空闲退出就收回 WiFi，缓冲里的歌留着。
-    // The network task being alive (including the hold while the music page is open) counts as use, so an
-    // AI chat ending does not drop the warmed-up WiFi. A pause alone does not hold the network: once the
-    // network task exits idle during a pause WiFi is released, and the buffered song stays.
-    return music_playing() || s_st.list_loading || s_net_task != NULL;
-}

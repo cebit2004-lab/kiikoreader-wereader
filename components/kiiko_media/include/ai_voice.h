@@ -51,17 +51,6 @@ void ai_toggle(void);
 void ai_get_status(ai_status_t *out);
 /// 对话进行中（占用网络与音频）。/ A chat is running (holding the network and audio).
 bool ai_active(void);
-/// 已关闭的 AI 连接还有任务在收尾（它的套接字可能还开着）。此时停 WiFi，它手里的接收缓冲会在驱动
-/// 卸载后才归还，所以要等它退出。
-/// A closed AI connection still has a task shutting down (its socket may still be open). Stopping WiFi
-/// now would let it return receive buffers after the driver is gone, so wait for it to exit.
-bool ai_net_busy(void);
-/// AI 什么都不占了：没有对话、没有预热（含进行中的）、收尾（停 WiFi、写日志）已做完、I2S 已关、旧连接已退出
-/// 或已放弃等待。ai_active() 在收尾开始时就变假（WiFi 收回要看它），要等全部收完的用这个。
-/// The AI holds nothing: no chat, no warm-up (including one in progress), teardown (WiFi stop, log
-/// write) finished, I2S closed, and the old connection gone or given up on. ai_active() turns false as
-/// teardown begins (the WiFi release depends on that); use this to wait for everything to be released.
-bool ai_fully_released(void);
 /// AI 页进出时调用。进页：后台先开音频再连 WiFi（不连 AI 服务），点开始时直接连服务；对话结束后页面还开着
 /// 就留着这两样，90 秒没有新对话才收回。离页：立即收回（对话由页面另行 ai_stop）。
 /// Call on entering and leaving the AI page. Entering: audio, then WiFi, come up in the background

@@ -16,13 +16,22 @@
 #include "esp_random.h"
 
 static const char *TAG = "vocab";
+// 主机测试可以换成自己的词库和目录（tools/vocab_progress_host_test.c）。
+// A host test may supply its own book and directory (tools/vocab_progress_host_test.c).
+#ifndef VOCAB_BIN_START
 extern const uint8_t vocab_bin_start[] asm("_binary_vocab_bin_start");
 extern const uint8_t vocab_bin_end[] asm("_binary_vocab_bin_end");
+#define VOCAB_BIN_START vocab_bin_start
+#define VOCAB_BIN_END vocab_bin_end
+#endif
+#ifndef VOCAB_FLASH_DIR
+#define VOCAB_FLASH_DIR "/flash"
+#endif
 
-#define PROGRESS_PATH "/flash/vocab.dat"
-#define PROGRESS_TMP "/flash/vocab.tmp"
-#define PROGRESS_BAK "/flash/vocab.bak"   // 换文件时的旧版 / the previous file during a save
-#define PROGRESS_OLD "/flash/vocab.old"   // 读不了的进度留一份 / one kept copy of an unreadable file
+#define PROGRESS_PATH VOCAB_FLASH_DIR "/vocab.dat"
+#define PROGRESS_TMP VOCAB_FLASH_DIR "/vocab.tmp"
+#define PROGRESS_BAK VOCAB_FLASH_DIR "/vocab.bak"   // 上一版，保存时轮换 / the previous version, rotated on save
+#define PROGRESS_OLD VOCAB_FLASH_DIR "/vocab.old"   // 读不了的进度留一份 / one kept copy of an unreadable file
 #define NO_DAY 0xFFFF                     // 还没有这一天 / no day yet
 #define CLOCK_MIN 1704067200              // 早于 2024-01-01 当作没对时 / earlier means the clock is not set
 #define DAY_BACK_MAX 30                   // 时钟往回拨超过这么多天才认 / a longer step back is a corrected clock
@@ -55,21 +64,28 @@ static const uint8_t k_daily_options[] = {5, 8, 10, 15};
 #define DAILY_DEFAULT 8
 #define REVIEW_WAIT_S (20 * 60)
 #define EVENING_HOUR 19
-// 进度文件 VPR4：头、每日状态、每词的词头哈希、每词进度。词库重新生成后按哈希把进度逐词对回去。
-// Progress file VPR4: header, daily state, one headword hash per word, then per-word progress. The hashes
-// carry progress word by word into a regenerated book.
+// 进度文件 VPR5：头、每日状态、u16 条数，之后只有学过的词，每条是词头哈希加进度。读的时候按哈希逐词对回
+// 本词库，词库重新生成也不丢进度；没学过的词不写，文件一般只有几 KB。
+// 头里的签名和词数只用来判断学习范围（单元编号）还能不能沿用。
+// VPR4（旧）：头、每日状态、每词一个哈希、每词一条进度，全部词都写。
+// Progress file VPR5: header, daily state, a u16 record count, then only words with progress, each a
+// headword hash plus its record. Loading matches records to the book by hash, so a regenerated book
+// keeps progress; untouched words are not written, so the file is usually a few KB. The header's
+// signature and word count only decide whether the saved scope (list numbers) still applies.
+// VPR4 (older): header, daily state, a hash for every word, then a record for every word.
 typedef struct __attribute__((packed)) {
     char magic[4];
     uint32_t book_sig;
     uint16_t words, scope_first, scope_count, last_day;
 } progress_head_t;
+typedef struct __attribute__((packed)) { uint32_t hash; vocab_progress_t p; } progress_rec_t;
 
 static const vocab_head_t *s_head;
 static const vocab_group_t *s_stage, *s_book;
 static const vocab_list_t *s_list;
 static const uint16_t *s_ids;
 static const uint32_t *s_word;
-static const char *s_str;
+static const char *s_str, *s_str_end;
 static vocab_progress_t *s_prog;
 static vocab_scope_t s_scope;
 static uint16_t s_last_day;
@@ -77,8 +93,7 @@ static vocab_dir_t s_dir;
 static const daily_t k_daily_fresh = {.daily_new = DAILY_DEFAULT, .stat_day = NO_DAY, .study_day = NO_DAY};
 static daily_t s_daily = {.daily_new = DAILY_DEFAULT, .stat_day = NO_DAY, .study_day = NO_DAY};
 static bool s_dirty;
-static uint32_t *s_hash;   // 每词的词头哈希 / headword hash per word
-static uint32_t s_sig;
+static uint32_t s_sig;     // 本词库签名 / signature of this book
 static bool s_broken;      // 内置词库没通过检查 / the built-in book failed its check
 static bool s_unloaded;    // 进度文件可能在但没读到 / a progress file may exist but was not read
 
@@ -153,39 +168,76 @@ static void keep_bad(const char *path) {
     else ESP_LOGW(TAG, "%s kept as %s", path, PROGRESS_OLD);
 }
 
+// 有没有学习记录；没有的词不写进文件。/ Whether a word has any progress; untouched words are not saved.
+static bool touched(const vocab_progress_t *p) {
+    return p->level || p->seen || p->wrong || p->streak || (p->right != NO_DAY && p->right != 0);
+}
+
+// 本词库的词头哈希索引，只在读进度时临时建，读完就释放。/ Headword hash index of the book, built only while
+// loading and freed afterwards.
+typedef struct { uint32_t *hash; uint16_t *order; } book_index_t;
+static const uint32_t *s_sort_hash;   // 给 qsort 比较用 / for the qsort comparator
+
 static int by_hash(const void *a, const void *b) {
-    const uint32_t x = s_hash[*(const uint16_t *)a], y = s_hash[*(const uint16_t *)b];
+    const uint32_t x = s_sort_hash[*(const uint16_t *)a], y = s_sort_hash[*(const uint16_t *)b];
     return x < y ? -1 : x > y ? 1 : 0;
 }
 
-// 词库变了：按词头哈希把旧进度逐词对回来，对不上的词从头学。/ The book changed: match old progress word by
-// word through the headword hash; unmatched words start fresh.
-static bool remap_progress(FILE *f, int n) {
-    if (n == 0) return true;
+static void index_free(book_index_t *ix) {
+    free(ix->hash);
+    free(ix->order);
+    ix->hash = NULL;
+    ix->order = NULL;
+}
+
+static bool index_build(book_index_t *ix) {
     const int words = s_head->words;
-    uint32_t *old = malloc(sizeof(*old) * (size_t)n);
-    uint16_t *order = malloc(sizeof(*order) * (size_t)words);
-    bool ok = old && order && fread(old, sizeof(*old), (size_t)n, f) == (size_t)n;
+    ix->hash = malloc(sizeof(*ix->hash) * (size_t)words);
+    ix->order = malloc(sizeof(*ix->order) * (size_t)words);
+    if (!ix->hash || !ix->order) { index_free(ix); return false; }
+    for (int i = 0; i < words; ++i) {
+        ix->hash[i] = word_hash(str(s_word[i]));
+        ix->order[i] = (uint16_t)i;
+    }
+    s_sort_hash = ix->hash;
+    qsort(ix->order, (size_t)words, sizeof(*ix->order), by_hash);
+    s_sort_hash = NULL;
+    return true;
+}
+
+// 按词头哈希找词，找不到返回 -1。/ Find a word by headword hash; -1 when the book lacks it.
+static int index_find(const book_index_t *ix, uint32_t h) {
+    int lo = 0, hi = s_head->words;
+    while (lo < hi) {
+        const int mid = (lo + hi) / 2;
+        if (ix->hash[ix->order[mid]] < h) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < s_head->words && ix->hash[ix->order[lo]] == h ? ix->order[lo] : -1;
+}
+
+// VPR4 的哈希和进度是两段，分块对着读，不用整段放进内存；对不上的词从头学。
+// VPR4 keeps hashes and records in two runs; read them in step, chunk by chunk, without holding either
+// run in memory. Unmatched words start fresh.
+static bool remap_v4(FILE *f, long n, const book_index_t *ix) {
+    const long hashes = ftell(f);
+    if (hashes < 0) return false;
     int matched = 0;
-    if (ok) {
-        for (int i = 0; i < words; ++i) order[i] = (uint16_t)i;
-        qsort(order, (size_t)words, sizeof(*order), by_hash);
-        for (int j = 0; j < n && ok; ++j) {
-            vocab_progress_t rec;
-            ok = fread(&rec, sizeof(rec), 1, f) == 1;
-            int lo = 0, hi = words;
-            while (lo < hi) {
-                const int mid = (lo + hi) / 2;
-                if (s_hash[order[mid]] < old[j]) lo = mid + 1;
-                else hi = mid;
-            }
-            if (ok && lo < words && s_hash[order[lo]] == old[j]) { s_prog[order[lo]] = rec; ++matched; }
+    for (long j = 0; j < n; j += 32) {
+        const size_t k = (size_t)(n - j < 32 ? n - j : 32);
+        uint32_t hash[32];
+        vocab_progress_t rec[32];
+        if (fseek(f, hashes + j * (long)sizeof(uint32_t), SEEK_SET) || fread(hash, sizeof(*hash), k, f) != k ||
+            fseek(f, hashes + n * (long)sizeof(uint32_t) + j * (long)sizeof(vocab_progress_t), SEEK_SET) ||
+            fread(rec, sizeof(*rec), k, f) != k)
+            return false;
+        for (size_t i = 0; i < k; ++i) {
+            const int id = index_find(ix, hash[i]);
+            if (id >= 0) { s_prog[id] = rec[i]; ++matched; }
         }
     }
-    free(old);
-    free(order);
-    if (ok) ESP_LOGW(TAG, "book changed: kept progress for %d of %d old words", matched, n);
-    return ok;
+    ESP_LOGW(TAG, "book changed: kept progress for %d of %ld old words", matched, n);
+    return true;
 }
 
 typedef enum { LOAD_MISSING, LOAD_BAD, LOAD_BUSY, LOAD_OK } load_t;
@@ -193,31 +245,49 @@ typedef enum { LOAD_MISSING, LOAD_BAD, LOAD_BUSY, LOAD_OK } load_t;
 // 读一个进度文件。长度对不上（截断）、读错、旧格式配不上本词库都算 LOAD_BAD，进度回到初始。
 // Read one progress file. A wrong length (truncated), a read error or an old format from another book
 // is LOAD_BAD, with progress reset.
-static load_t load_file(const char *path) {
+static load_t load_file(const char *path, const book_index_t *ix) {
     struct stat st;
     if (stat(path, &st) != 0) return LOAD_MISSING;
     FILE *f = fopen(path, "rb");
     if (!f) return LOAD_BUSY;
     reset_progress();
-    const long size = (long)st.st_size, head = (long)sizeof(progress_head_t);
+    const long size = (long)st.st_size, head = (long)sizeof(progress_head_t), daily = (long)sizeof(daily_t);
     progress_head_t h;
     bool ok = fread(&h, sizeof(h), 1, f) == 1;
     const long n = ok ? h.words : 0;
     const bool same = ok && n == s_head->words && h.book_sig == s_sig;
     bool migrated = false;
     if (!ok) {
+    } else if (!memcmp(h.magic, "VPR5", 4)) {
+        uint16_t count = 0;
+        ok = fread(&s_daily, sizeof(s_daily), 1, f) == 1 && fread(&count, sizeof(count), 1, f) == 1 &&
+             size == head + daily + (long)sizeof(count) + (long)count * (long)sizeof(progress_rec_t);
+        if (ok && s_daily.dir <= VOCAB_DIR_ZH_EN) s_dir = (vocab_dir_t)s_daily.dir;
+        int matched = 0;
+        for (int j = 0; j < count && ok; ++j) {
+            progress_rec_t r;
+            ok = fread(&r, sizeof(r), 1, f) == 1;
+            const int id = ok ? index_find(ix, r.hash) : -1;
+            if (id >= 0) { s_prog[id] = r.p; ++matched; }
+        }
+        // 词库变了就重写一遍，丢掉对不上的词、记下新签名。/ A changed book is rewritten without unmatched words.
+        if (ok && (!same || matched < count)) {
+            ESP_LOGW(TAG, "book changed: kept progress for %d of %u saved words", matched, count);
+            migrated = true;
+        }
     } else if (!memcmp(h.magic, "VPR4", 4)) {
-        ok = size == head + (long)sizeof(daily_t) + n * (long)(sizeof(uint32_t) + sizeof(vocab_progress_t)) &&
+        ok = size == head + daily + n * (long)(sizeof(uint32_t) + sizeof(vocab_progress_t)) &&
              fread(&s_daily, sizeof(s_daily), 1, f) == 1;
         if (ok && s_daily.dir <= VOCAB_DIR_ZH_EN) s_dir = (vocab_dir_t)s_daily.dir;
         if (ok && same)
             ok = fseek(f, n * (long)sizeof(uint32_t), SEEK_CUR) == 0 &&
                  fread(s_prog, sizeof(*s_prog), (size_t)n, f) == (size_t)n;
-        else if (ok) migrated = ok = remap_progress(f, (int)n);
+        else if (ok) ok = remap_v4(f, n, ix);
+        migrated = true;
     } else if (!same) {
-        ok = false;   // 旧格式没有逐词哈希，词库变了就对不回来 / older formats cannot follow a changed book
+        ok = false;   // 更旧的格式没有逐词哈希，词库变了就对不回来 / older formats cannot follow a changed book
     } else if (!memcmp(h.magic, "VPR3", 4)) {
-        ok = size == head + (long)sizeof(daily_t) + n * (long)sizeof(vocab_progress_v3_t) &&
+        ok = size == head + daily + n * (long)sizeof(vocab_progress_v3_t) &&
              fread(&s_daily, sizeof(s_daily), 1, f) == 1;
         if (ok && s_daily.dir <= VOCAB_DIR_ZH_EN) s_dir = (vocab_dir_t)s_daily.dir;
         for (int i = 0; i < n && ok; ++i) {
@@ -265,32 +335,37 @@ static load_t load_file(const char *path) {
 }
 
 // 依次试 vocab.dat、vocab.tmp、vocab.bak；读不了的挪开，不会被之后的保存盖掉。
+// dat 在就总是 dat 赢：bak 只是上一版，只有 dat 和 tmp 都不可用时才拿来恢复。
 // Try vocab.dat, then vocab.tmp, then vocab.bak; unreadable files are set aside so a later save never
-// overwrites them.
+// overwrites them. A present dat always wins: bak is the previous version, used only when neither dat
+// nor tmp can be read.
 static void load_progress(void) {
     reset_progress();
     s_unloaded = false;
     if (book_store_flash_mount() != ESP_OK) { s_unloaded = true; return; }
+    book_index_t ix = {0};
+    if (!index_build(&ix)) { s_unloaded = true; ESP_LOGW(TAG, "no memory to load progress"); return; }
     // dat 不在时 tmp 一定是写完整的那份（比 bak 新）；写了一半的 tmp 会因长度不符被挪开。
     // With dat missing, tmp is the complete newer copy; a half-written tmp fails the length check.
     static const char *const k_paths[] = {PROGRESS_PATH, PROGRESS_TMP, PROGRESS_BAK};
     for (int i = 0; i < 3; ++i) {
-        const load_t r = load_file(k_paths[i]);
-        if (r == LOAD_BUSY) { s_unloaded = true; ESP_LOGW(TAG, "%s could not be opened", k_paths[i]); return; }
+        const load_t r = load_file(k_paths[i], &ix);
+        if (r == LOAD_BUSY) { s_unloaded = true; ESP_LOGW(TAG, "%s could not be opened", k_paths[i]); break; }
         if (r == LOAD_BAD) {
             ESP_LOGW(TAG, "%s is damaged or from another book", k_paths[i]);
             keep_bad(k_paths[i]);
             continue;
         }
         if (r == LOAD_OK) {
-            // 从备份恢复的就地改回正式文件名。/ A file recovered from a backup takes the main name again.
+            // 从 tmp 或 bak 恢复的就地改回正式文件名。/ A file recovered from tmp or bak takes the main name again.
             if (i > 0) {
                 ESP_LOGW(TAG, "progress recovered from %s", k_paths[i]);
                 if (rename(k_paths[i], PROGRESS_PATH) != 0) s_dirty = true;
             }
-            return;
+            break;
         }
     }
+    index_free(&ix);
 }
 
 void vocab_save(void) {
@@ -309,32 +384,43 @@ void vocab_save(void) {
     }
     FILE *f = fopen(PROGRESS_TMP, "wb");
     if (!f) { ESP_LOGW(TAG, "save: open failed"); return; }
-    progress_head_t h = {.magic = {'V', 'P', 'R', '4'}, .book_sig = s_sig, .words = s_head->words,
+    progress_head_t h = {.magic = {'V', 'P', 'R', '5'}, .book_sig = s_sig, .words = s_head->words,
                          .scope_first = (uint16_t)s_scope.first, .scope_count = (uint16_t)s_scope.count,
                          .last_day = s_last_day};
     s_daily.dir = (uint8_t)s_dir;
-    const size_t n = s_head->words;
-    const bool ok = fwrite(&h, sizeof(h), 1, f) == 1 && fwrite(&s_daily, sizeof(s_daily), 1, f) == 1 &&
-                    fwrite(s_hash, sizeof(*s_hash), n, f) == n && fwrite(s_prog, sizeof(*s_prog), n, f) == n;
+    // 只写学过的词，哈希现算。/ Only words with progress, hashed on the spot.
+    uint16_t count = 0;
+    for (int i = 0; i < s_head->words; ++i) count += touched(&s_prog[i]);
+    bool ok = fwrite(&h, sizeof(h), 1, f) == 1 && fwrite(&s_daily, sizeof(s_daily), 1, f) == 1 &&
+              fwrite(&count, sizeof(count), 1, f) == 1;
+    for (int i = 0; i < s_head->words && ok; ++i) {
+        if (!touched(&s_prog[i])) continue;
+        const progress_rec_t r = {.hash = word_hash(str(s_word[i])), .p = s_prog[i]};
+        ok = fwrite(&r, sizeof(r), 1, f) == 1;
+    }
     if (fclose(f) != 0 || !ok) { remove(PROGRESS_TMP); ESP_LOGW(TAG, "save: write failed"); return; }
-    // 换文件：旧的改名成 bak，新的就位后再删 bak。任何一步掉电，dat、bak、tmp 里总有一份完整的。
-    // Swap: old → bak, tmp → dat, then drop bak. Power loss at any step leaves one complete file.
-    if (file_exists(PROGRESS_PATH)) {
+    // 换文件：旧 dat 改名成 bak，tmp 改名成 dat。任何一步掉电，dat、tmp、bak 里总有一份完整的；
+    // bak 留着当上一版，省一次删除，读的时候 dat 优先，它不会盖过新的 dat。
+    // Swap: old dat → bak, tmp → dat. Power loss at any step leaves one complete file. bak stays as the
+    // previous version, saving a delete; loading prefers dat, so it never wins over a newer dat.
+    const bool had_dat = file_exists(PROGRESS_PATH);
+    if (had_dat) {
         remove(PROGRESS_BAK);
         if (rename(PROGRESS_PATH, PROGRESS_BAK) != 0) { ESP_LOGW(TAG, "save: backup rename failed"); return; }
     }
     if (rename(PROGRESS_TMP, PROGRESS_PATH) != 0) {
         ESP_LOGW(TAG, "save: rename failed");
-        rename(PROGRESS_BAK, PROGRESS_PATH);
+        if (had_dat) rename(PROGRESS_BAK, PROGRESS_PATH);   // 只还原本次挪走的 / restore only what this save moved
         return;
     }
-    remove(PROGRESS_BAK);
     s_dirty = false;
 }
 
-// 内置词库打开时整体检查一次：各段都在文件内、编号不越界、每个字符串都在字符串区内并以 NUL 结尾。
-// Check the built-in book once: every section inside the blob, indices in range, and every string inside
-// the string section and NUL-terminated.
+// 内置词库打开时检查一次：各段都在文件内、编号不越界、名称和词条偏移都落在以 NUL 结尾的字符串区里。
+// 每个词的七个字段由 vocab_word 按字符串区末尾收住，这里不逐个扫描。
+// Check the built-in book once: every section inside the blob, indices in range, and name and word
+// offsets inside the NUL-terminated string section. vocab_word bounds a word's seven fields by the end
+// of the section, so they are not scanned here.
 static bool book_valid(const uint8_t *base, size_t size) {
     const vocab_head_t *h = (const vocab_head_t *)base;
     if (size < sizeof(*h) || memcmp(h->magic, "VOC2", 4) || !h->stages || !h->books || !h->lists || !h->words)
@@ -349,7 +435,6 @@ static bool book_valid(const uint8_t *base, size_t size) {
     for (size_t i = 0; i < sizeof(sec) / sizeof(sec[0]); ++i)
         if (sec[i].off > size || sec[i].len > size - sec[i].off || sec[i].off % sec[i].align) return false;
     if (h->off_str >= size || base[size - 1] != 0) return false;
-    const char *strs = (const char *)base + h->off_str;
     const size_t str_len = size - h->off_str;
     const vocab_group_t *stage = (const vocab_group_t *)(base + h->off_stage);
     const vocab_group_t *book = (const vocab_group_t *)(base + h->off_book);
@@ -364,45 +449,33 @@ static bool book_valid(const uint8_t *base, size_t size) {
         if (list[i].name >= str_len || list[i].first > h->ids || list[i].count > h->ids - list[i].first) return false;
     for (uint32_t i = 0; i < h->ids; ++i)
         if (ids[i] >= h->words) return false;
-    for (int i = 0; i < h->words; ++i) {
-        size_t p = word[i];
-        for (int k = 0; k < 7; ++k) {   // 七个字段 / seven fields
-            const char *z = p < str_len ? memchr(strs + p, 0, str_len - p) : NULL;
-            if (!z) return false;
-            p = (size_t)(z - strs) + 1;
-        }
-    }
+    for (int i = 0; i < h->words; ++i)
+        if (word[i] >= str_len) return false;
     return true;
 }
 
 bool vocab_open(void) {
     if (s_broken) return false;
     if (s_head) return true;
-    const vocab_head_t *h = (const vocab_head_t *)vocab_bin_start;
-    const size_t size = (size_t)(vocab_bin_end - vocab_bin_start);
-    if (!book_valid(vocab_bin_start, size)) {
+    const uint8_t *base = VOCAB_BIN_START;
+    const vocab_head_t *h = (const vocab_head_t *)base;
+    const size_t size = (size_t)(VOCAB_BIN_END - base);
+    if (!book_valid(base, size)) {
         ESP_LOGE(TAG, "built-in book is damaged");
         s_broken = true;
         return false;
     }
     vocab_progress_t *prog = calloc(h->words, sizeof(*prog));
-    uint32_t *hash = malloc(sizeof(*hash) * h->words);
-    if (!prog || !hash) {
-        free(prog);
-        free(hash);
-        ESP_LOGE(TAG, "no memory for progress");
-        return false;
-    }
-    s_stage = (const vocab_group_t *)(vocab_bin_start + h->off_stage);
-    s_book = (const vocab_group_t *)(vocab_bin_start + h->off_book);
-    s_list = (const vocab_list_t *)(vocab_bin_start + h->off_list);
-    s_ids = (const uint16_t *)(vocab_bin_start + h->off_ids);
-    s_word = (const uint32_t *)(vocab_bin_start + h->off_word);
-    s_str = (const char *)(vocab_bin_start + h->off_str);
+    if (!prog) { ESP_LOGE(TAG, "no memory for progress"); return false; }
+    s_stage = (const vocab_group_t *)(base + h->off_stage);
+    s_book = (const vocab_group_t *)(base + h->off_book);
+    s_list = (const vocab_list_t *)(base + h->off_list);
+    s_ids = (const uint16_t *)(base + h->off_ids);
+    s_word = (const uint32_t *)(base + h->off_word);
+    s_str = (const char *)(base + h->off_str);
+    s_str_end = (const char *)(base + size);
     s_prog = prog;
-    s_hash = hash;
     s_head = h;
-    for (int i = 0; i < h->words; ++i) s_hash[i] = word_hash(str(s_word[i]));
     s_sig = book_sig();
     load_progress();
     ESP_LOGI(TAG, "book: %u words in %u lists; scope %d+%d", h->words, h->lists, s_scope.first, s_scope.count);
@@ -436,8 +509,13 @@ int vocab_list_book(int list) {
 bool vocab_word(int id, vocab_word_t *out) {
     if (!s_head || id < 0 || id >= s_head->words) return false;
     const char **field[7] = {&out->en, &out->ipa, &out->zh, &out->pos, &out->forms, &out->ex_en, &out->ex_zh};
+    // 字符串区以 NUL 结尾；字段走到区尾之后一律当空串，不会读出界。
+    // The string section ends with a NUL; fields past its end read as empty, never out of bounds.
     const char *p = str(s_word[id]);
-    for (int i = 0; i < 7; ++i) { *field[i] = p; p += strlen(p) + 1; }
+    for (int i = 0; i < 7; ++i) {
+        *field[i] = p < s_str_end ? p : "";
+        if (p < s_str_end) p += strlen(p) + 1;
+    }
     return true;
 }
 

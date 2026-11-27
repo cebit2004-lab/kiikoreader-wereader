@@ -7,19 +7,19 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdatomic.h>
 #include <stdio.h>
 
-#include "ai_voice.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
-#include "music_player.h"
 #include "read_pico_transfer.h"
 
 static const char *TAG = "media_net";
@@ -38,10 +38,31 @@ static StaticSemaphore_t s_lock_storage;
 static uint32_t s_gen;
 static bool s_keep_after;
 static bool s_adopt_next;  ///< 下一次自己启动的会话顶替了别人的 WiFi / the next session started here replaces someone else's WiFi
+/*
+ * 占用位：s_clients 是正占着网络的各方（media_net_client_t 位），只在持 s_lock 时改。s_free 的位与之相反（该方
+ * 没占着就置位），供 drop 与 wait_idle 等放手通知；位也只在持锁时改。
+ * Holding bits: s_clients is the set of clients holding the network (media_net_client_t bits), changed
+ * only under s_lock. The bits of s_free are the inverse (set while that client does not hold it), so drop
+ * and wait_idle can wait for a release; they too change only under the lock.
+ */
+#define ALL_CLIENTS (MEDIA_NET_MUSIC | MEDIA_NET_AI)
+static _Atomic unsigned s_clients;
+static EventGroupHandle_t s_free;
+static StaticEventGroup_t s_free_storage;
 
 static void take(void) {
-    if (!s_lock) s_lock = xSemaphoreCreateMutexStatic(&s_lock_storage);
+    if (!s_lock) {
+        s_free = xEventGroupCreateStatic(&s_free_storage);
+        xEventGroupSetBits(s_free, ALL_CLIENTS);
+        s_lock = xSemaphoreCreateMutexStatic(&s_lock_storage);
+    }
     xSemaphoreTake(s_lock, portMAX_DELAY);
+}
+
+// 持锁时调用。/ Call holding the lock.
+static void hold(media_net_client_t client) {
+    atomic_fetch_or(&s_clients, (unsigned)client);
+    xEventGroupClearBits(s_free, client);
 }
 
 // 放手：不再认这个会话。/ Let go of the session.
@@ -74,8 +95,9 @@ static bool start_own(void) {
     return true;
 }
 
-bool media_net_acquire(char *err, size_t err_size, const volatile bool *cancel) {
+bool media_net_acquire(media_net_client_t client, char *err, size_t err_size, const volatile bool *cancel) {
     take();
+    hold(client);
     read_pico_transfer_status_t st;
     read_pico_transfer_get_status(&st);
     bool ok = sta_online(&st);
@@ -128,24 +150,21 @@ bool media_net_acquire(char *err, size_t err_size, const volatile bool *cancel) 
     return ok;
 }
 
-/*
- * 旧 AI 连接的任务还在收尾时先等它退出再停 WiFi：它的套接字可能还压着驱动的接收缓冲，驱动卸载后
- * 再归还就是访问已释放的内存。它卡在 TCP 连接阶段时套接字关不掉，最长约等于连接超时（20 秒）。
- * Before stopping WiFi, wait for an old AI connection's task to exit: its socket may still hold driver
- * receive buffers, and returning them after the driver is gone touches freed memory. A task stuck in
- * the TCP connect cannot have its socket shut, so this can take up to the connect timeout (20 s).
- */
-static void wait_ai_net_idle(void) {
-    if (!ai_net_busy()) return;
-    const int64_t t0 = esp_timer_get_time();
-    for (int i = 0; i < 250 && ai_net_busy(); ++i) vTaskDelay(pdMS_TO_TICKS(100));
-    const int ms = (int)((esp_timer_get_time() - t0) / 1000);
-    if (ai_net_busy()) ESP_LOGW(TAG, "old AI connection still open after %d ms; stopping WiFi anyway", ms);
-    else ESP_LOGI(TAG, "waited %d ms for the old AI connection to close", ms);
-}
-
-void media_net_drop(void) {
-    wait_ai_net_idle();
+void media_net_drop(media_net_client_t client, int wait_ms) {
+    take();
+    const EventBits_t others = (EventBits_t)(ALL_CLIENTS & ~(unsigned)client);
+    const bool others_hold = (atomic_load(&s_clients) & others) != 0;
+    xSemaphoreGive(s_lock);
+    // 其他方还占着（比如 AI 的旧连接还在收尾，它的套接字可能还压着驱动的接收缓冲）：等它们放手再断。
+    // Other clients still hold it (say, the AI's old connection is still shutting down, its socket possibly
+    // holding driver receive buffers): wait for them to let go before dropping.
+    if (others_hold && wait_ms > 0) {
+        const int64_t t0 = esp_timer_get_time();
+        const bool freed = (xEventGroupWaitBits(s_free, others, pdFALSE, pdTRUE, pdMS_TO_TICKS(wait_ms)) & others) == others;
+        const int ms = (int)((esp_timer_get_time() - t0) / 1000);
+        if (freed) ESP_LOGI(TAG, "waited %d ms for the other client to let go", ms);
+        else ESP_LOGW(TAG, "other client still holds the network after %d ms; dropping anyway", ms);
+    }
     take();
     read_pico_transfer_status_t st;
     read_pico_transfer_get_status(&st);
@@ -163,12 +182,10 @@ void media_net_drop(void) {
     xSemaphoreGive(s_lock);
 }
 
-void media_net_release_if_unused(void) {
+void media_net_release(media_net_client_t client) {
     take();
-    // 旧 AI 连接还在收尾时不收：AI 的控制任务等它退出后会再调一次。AI 页预热保留期间也不收。
-    // Not while an old AI connection is shutting down: the AI control task calls again once it exits.
-    // Nor while the AI page holds its warm-up.
-    if (owns_current() && !music_net_busy() && !ai_active() && !ai_net_busy() && !ai_warm_held()) {
+    const unsigned left = atomic_load(&s_clients) & ~(unsigned)client;
+    if (!left && owns_current()) {
         read_pico_transfer_status_t st;
         read_pico_transfer_get_status(&st);
         // 已被别人停掉，或顶替的是用户原本开着的 WiFi：只放手。再调停止会顺手取消用户正在做的临时对时。
@@ -182,7 +199,26 @@ void media_net_release_if_unused(void) {
             ESP_LOGI(TAG, "network released");
         }
     }
+    // 收回做完才清位：media_net_idle 为真、等着的一方醒来时，WiFi 已停。
+    // Cleared only after the release work, so once media_net_idle is true or a waiter wakes, WiFi has stopped.
+    atomic_fetch_and(&s_clients, ~(unsigned)client);
+    xEventGroupSetBits(s_free, client);
     xSemaphoreGive(s_lock);
+}
+
+void media_net_forget(media_net_client_t client) {
+    take();
+    atomic_fetch_and(&s_clients, ~(unsigned)client);
+    xEventGroupSetBits(s_free, client);
+    xSemaphoreGive(s_lock);
+}
+
+bool media_net_idle(void) { return atomic_load(&s_clients) == 0; }
+
+bool media_net_wait_idle(int wait_ms) {
+    if (!s_free) return media_net_idle();
+    const TickType_t ticks = wait_ms > 0 ? pdMS_TO_TICKS(wait_ms) : 0;
+    return (xEventGroupWaitBits(s_free, ALL_CLIENTS, pdFALSE, pdTRUE, ticks) & ALL_CLIENTS) == ALL_CLIENTS;
 }
 
 /*

@@ -3,7 +3,6 @@
 #include <stdbool.h>
 bool ai_active(void);
 bool ai_audio_busy(void);
-bool ai_net_busy(void);
 bool ai_warm_held(void);
 void ai_start(void);
 void ai_toggle(void);

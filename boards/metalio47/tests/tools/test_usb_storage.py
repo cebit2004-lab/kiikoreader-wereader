@@ -90,6 +90,19 @@ int tinyusb_driver_install(const tinyusb_config_t *config);
 int tinyusb_driver_uninstall(void);
 bool tud_mounted(void);
 void tud_disconnect(void);
+#include <stddef.h>
+#define MALLOC_CAP_INTERNAL 1
+#define MALLOC_CAP_DMA 2
+static inline size_t heap_caps_get_free_size(unsigned caps){(void)caps;return 0;}
+static inline size_t heap_caps_get_largest_free_block(unsigned caps){(void)caps;return 0;}
+static int64_t esp_timer_get_time(void){return 0;}
+static int media_released;
+static void music_shutdown(void){++media_released;}
+static void ai_page_open(bool open){assert(!open);}
+static void ai_stop(void){}
+static bool metalio_audio_wait_free(int ms){assert(ms==5000);return true;}
+static inline int metalio_audio_owner(void){return 0;}
+static bool media_net_wait_idle(int ms){assert(ms==5000);return true;}
 '''
 UNIT = r'''
 #include "usb_stub.h"
@@ -201,7 +214,8 @@ with tempfile.TemporaryDirectory() as d:
     (p/'usb_stub.h').write_text(STUB)
     for name in ('ui_avatar.h','book_cover_jobs.h','book_lock_collage.h','metalio_hw.h','esp_err.h','driver/sdmmc_host.h','esp_log.h','esp_private/usb_phy.h',
                  'freertos/FreeRTOS.h','freertos/task.h','read_pico_sd.h','read_pico_sd_msc.h','sdmmc_cmd.h',
-                 'device/usbd_pvt.h','tinyusb.h','tinyusb_default_config.h','tinyusb_msc.h','ttf_font.h'):
+                 'device/usbd_pvt.h','tinyusb.h','tinyusb_default_config.h','tinyusb_msc.h','ttf_font.h',
+                 'music_player.h','ai_voice.h','media_net.h','metalio_audio.h','esp_heap_caps.h','esp_timer.h'):
         header=p/name;header.parent.mkdir(parents=True,exist_ok=True);header.write_text('#include "usb_stub.h"\n')
     (p/'test.c').write_text(UNIT)
     subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-g','-fsanitize=address,undefined',

@@ -9,6 +9,8 @@
 #include "usb_storage.h"
 #include "music_player.h"
 #include "ai_voice.h"
+#include "media_net.h"
+#include "metalio_audio.h"
 #include "esp_heap_caps.h"
 #include "ui_avatar.h"
 #include "book_cover_jobs.h"
@@ -19,6 +21,7 @@
 #include "device/usbd_pvt.h"
 #include "driver/sdmmc_host.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "read_pico_sd.h"
@@ -38,6 +41,9 @@ static bool s_active;
 static bool s_cleanup_pending;
 enum { USB_RUNNING, USB_DRAINING, USB_PARKED };
 static atomic_int s_usb_stop_state;
+// 进入 U 盘模式前最多等音乐与 AI 放下音频和网络这么久，之后照旧继续。
+// How long USB start waits at most for music and the AI to let go of audio and the network, then carries on.
+#define MEDIA_RELEASE_WAIT_MS 5000
 static atomic_bool s_usb_park_queued;
 
 // 在USB任务内确认已接纳的事件全部退出，再停车；不强删持有SD锁的任务。
@@ -109,21 +115,23 @@ esp_err_t usb_storage_start(void) {
     if (s_active) return ESP_OK;
     read_pico_sd_info_t info = {0};
     if (read_pico_sd_get_info(&info) != ESP_OK || !info.mounted) return ESP_ERR_INVALID_STATE;
-    // 音乐正从卡上读文件：先停播放并释放音频，电脑接管前本机不能再碰卡。
-    // Music reads from the card: stop it and release audio before the host takes the card over.
-    if (music_active()) music_stop();
-    // AI：结束对话并收回预热（AI 页开着时也收），再等它把 WiFi、I2S 和旧连接都放掉：ai_active() 在停 WiFi
-    // 之前就变假，只等它的话 U 盘会和停 WiFi 抢内部 DMA。最多等 5 秒，之后照旧继续。
-    // AI: end the chat and drop the warm-up (even with the AI page open), then wait until WiFi, I2S and
-    // the old connection are all released: ai_active() turns false before WiFi stops, and waiting on it
-    // alone let USB compete with the WiFi stop for internal DMA. Wait 5 s at most, then carry on as before.
-    if (!ai_fully_released()) {
-        ai_page_open(false);
-        ai_stop();
-        int i = 0;
-        for (; i < 250 && !ai_fully_released(); ++i) vTaskDelay(pdMS_TO_TICKS(20));
-        if (!ai_fully_released()) ESP_LOGW(TAG, "USB start: AI still releasing after %d ms", i * 20);
-    }
+    // 音乐与 AI：停播放、结束对话并收回预热（AI 页开着时也收），音乐的联网任务也不等保留期，再等两边把 I2S
+    // 和 WiFi 都放掉（等放手通知）：电脑接管前本机不能再碰卡，U 盘也不能和停 WiFi 抢内部 DMA。最多等 5 秒，之后照旧继续。
+    // Music and the AI: stop playback, end the chat and drop the warm-up (even with the AI page open), and
+    // have music's network task skip its hold; then wait (woken by the releases) until both have let go of
+    // I2S and WiFi: the host must own the card alone, and USB must not compete with the WiFi stop for
+    // internal DMA. Wait 5 s at most, then carry on as before.
+    music_shutdown();
+    ai_page_open(false);
+    ai_stop();
+    const int64_t wait_from = esp_timer_get_time();
+    const bool audio_free = metalio_audio_wait_free(MEDIA_RELEASE_WAIT_MS);
+    const int left_ms = MEDIA_RELEASE_WAIT_MS - (int)((esp_timer_get_time() - wait_from) / 1000);
+    const bool net_idle = media_net_wait_idle(left_ms > 0 ? left_ms : 0);
+    if (!audio_free || !net_idle)
+        ESP_LOGW(TAG, "USB start: media still releasing after %d ms (audio owner %d, network %s)",
+                 (int)((esp_timer_get_time() - wait_from) / 1000), (int)metalio_audio_owner(),
+                 net_idle ? "idle" : "held");
     ESP_LOGI(TAG, "USB start: internal DMA free=%u largest=%u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
