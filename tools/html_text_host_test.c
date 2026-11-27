@@ -274,7 +274,6 @@ int main(void) {
     assert(!t.notes && !t.note_count);
     html_text_free(&t);
 
-#if KIIKO_BOARD_METALIO47
     const char *marked = "<p><!--wr-co:10-->甲&amp;乙</p><p><!--wr-co:30-->丙😀丁</p>";
     unsigned position;
     assert(html_weread_position(marked,strlen(marked),true,4,&position) && position==16);
@@ -282,6 +281,5 @@ int main(void) {
     assert(html_weread_position(marked,strlen(marked),true,15,&position) && position==33);
     assert(html_weread_position(marked,strlen(marked),false,33,&position) && position==15);
     assert(!html_weread_position("<p>普通书籍</p>",strlen("<p>普通书籍</p>"),true,0,&position));
-#endif
     puts("html_text_host_test: PASS");
 }

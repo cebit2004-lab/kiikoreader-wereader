@@ -12,7 +12,6 @@
 #include <stdint.h>
 #include "esp_err.h"
 
-#if KIIKO_BOARD_METALIO47
 // 槽位 6MB（见 boards/metalio47/partitions.csv）；布局标识随之升级，旧布局设备不会接受新包。
 // Slots are 6MB (see boards/metalio47/partitions.csv); the layout id changes so devices on the
 // old 5MB layout refuse this release instead of writing a mismatched slot.
@@ -23,15 +22,6 @@
 #define PICO_OTA_CAPABILITY "METALIO_S31_HTTPS_OTA_V1"
 #define PICO_OTA_FEED_URL "https://wegooo-cell.github.io/read-pico-reader/metalio-s31-update.json"
 #define PICO_OTA_FEED_FALLBACK_URL "https://kiikoread.com/metalio-s31-update.json"
-#else
-#define PICO_OTA_IMAGE_MAX 0x400000
-#define PICO_OTA_PROJECT "Read_Pico"
-#define PICO_OTA_LAYOUT "pico-dual-4m-v1"
-#define PICO_OTA_BOARD "RDP-G01-W"
-#define PICO_OTA_CAPABILITY "PICO_HTTPS_OTA_V1"
-#define PICO_OTA_FEED_URL "https://wegooo-cell.github.io/read-pico-reader/update.json"
-#define PICO_OTA_FEED_FALLBACK_URL "https://kiikoread.com/update.json"
-#endif
 
 typedef enum { PICO_UPDATE_IDLE, PICO_UPDATE_CHECKING, PICO_UPDATE_AVAILABLE,
                PICO_UPDATE_LATEST, PICO_UPDATE_DOWNLOADING, PICO_UPDATE_READY,

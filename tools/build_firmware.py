@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-Kiikoread-Personal-Study-1.0
-"""Build one maintained source tree for Pico or Metalio 4.7; never flash or publish."""
+"""Build the maintained source tree for Metalio 4.7; never flash or publish."""
 from pathlib import Path
 import argparse
 import hashlib
@@ -97,7 +97,6 @@ def export(build, output, board):
     settings_short = board == 'metalio47' and cache.exists() and 'METALIO_SETTINGS_SHORT_MOTION:BOOL=ON' in cache.read_text(encoding='utf-8')
     experimental_trimmed_waveform = board == 'metalio47' and cache.exists() and 'METALIO_TRIMMED_WAVEFORM:BOOL=ON' in cache.read_text(encoding='utf-8')
     experimental_main_clean = board == 'metalio47' and cache.exists() and 'METALIO_MAIN_CLEAN_EXPERIMENT:BOOL=ON' in cache.read_text(encoding='utf-8')
-    experimental_main_clean |= board == 'pico' and cache.exists() and 'PICO_MAIN_CLEAN_EXPERIMENT:BOOL=ON' in cache.read_text(encoding='utf-8')
     experimental_network = board == 'metalio47' and cache.exists() and 'METALIO_NETWORK_PROBE:BOOL=ON' in cache.read_text(encoding='utf-8')
     transfer_start = board == 'metalio47' and cache.exists() and 'METALIO_LOCAL_TRANSFER_START:BOOL=ON' in cache.read_text(encoding='utf-8')
     config_header=build/'config/sdkconfig.h'
@@ -119,7 +118,7 @@ def export(build, output, board):
                 'experimental_early_power_key': bool(early_key),
                 'requires_bootloader_update': bool(early_key),
                 'project': identity['project'], 'new_install_prompt_erase': False,
-                'builds': [{'chipFamily': 'ESP32-S3' if board == 'pico' else 'ESP32-S31', 'parts': []}]}
+                'builds': [{'chipFamily': 'ESP32-S31', 'parts': []}]}
     checksums, args = [], [shlex.join(plan['write_flash_args'])]
     flash_pairs = []
     for name, source, offset in parts:
@@ -205,7 +204,6 @@ def build_one(board, args):
                '-DMETALIO_SETTINGS_SHORT_MOTION=' + ('ON' if board == 'metalio47' and getattr(args,'s31_settings_short_motion',False) else 'OFF'),
                '-DMETALIO_TRIMMED_WAVEFORM=' + ('ON' if board == 'metalio47' and args.s31_trimmed_waveform else 'OFF'),
                '-DMETALIO_MAIN_CLEAN_EXPERIMENT=' + ('ON' if board == 'metalio47' and args.s31_main_clean else 'OFF'),
-               '-DPICO_MAIN_CLEAN_EXPERIMENT=' + ('ON' if board == 'pico' and args.pico_main_clean else 'OFF'),
                '-DMETALIO_UI_GRAY22_EXPERIMENT=OFF',
                '-DMETALIO_NETWORK_PROBE=' + ('ON' if board == 'metalio47' and args.s31_network_probe else 'OFF'),
                '-DMETALIO_LOCAL_TRANSFER_START=' + ('ON' if board == 'metalio47' and getattr(args, 's31_transfer_startup_test', False) else 'OFF'),
@@ -307,7 +305,7 @@ def build_one(board, args):
     if args.tools:
         tools = args.tools.resolve()
         env['IDF_TOOLS_PATH'] = str(tools)
-        architecture = 'xtensa-esp-elf' if board == 'pico' else 'riscv32-esp-elf'
+        architecture = 'riscv32-esp-elf'
         extra.extend(str(path) for path in (tools / 'tools' / architecture).glob('**/bin') if path.is_dir())
         extra.extend(str(path) for path in (tools / 'tools/esp32ulp-elf').glob('**/bin') if path.is_dir())
     env['PATH'] = os.pathsep.join(extra + [env.get('PATH', '')])
@@ -341,39 +339,12 @@ def main():
     parser.add_argument('--s31-du14', action='store_true', help='Explicit local S31 vendor14-phase binary experiment; gray/cleanup keep their tables')
     parser.add_argument('--s31-settings-short-motion', action='store_true', help='Local S31 settings-motion-only DU14; reader/other pages and idle white recovery stay unchanged')
     parser.add_argument('--s31-trimmed-waveform', action='store_true', help='Local S31 rollback to the trimmed 37-phase waveform; normal builds keep vendor full 48')
-    parser.add_argument('--pico-main-clean', action='store_true', help='Local Pico root-switch erasure using its own LUTs within40 phases')
     parser.add_argument('--s31-main-clean', action='store_true', help='Local S31 root-switch quality: six/eight changed-white drives plus two release holds')
     parser.add_argument('--s31-network-probe', action='store_true', help='Local S31 read-only radio counters; not a delivery default')
     parser.add_argument('--s31-transfer-startup-test', action='store_true', help='Unattended local S31 transfer startup; never deliver')
     parser.add_argument('--s31-early-power-key', action='store_true', help='Local S31 bootloader P17 capture experiment; requires a matched bootloader and application')
     args = parser.parse_args()
     args.board = canonical_board(args.board)
-    if args.s31_pie and args.board == 'pico':
-        parser.error('--s31-pie requires metalio47 or all')
-    if args.s31_text_ripple and args.board == 'pico':
-        parser.error('--s31-text-ripple requires metalio47 or all')
-    if args.s31_reader_panel37 and args.board == 'pico':
-        parser.error('--s31-reader-panel37 requires metalio47 or all')
-    if args.s31_shelf37 and args.board == 'pico':
-        parser.error('--s31-shelf37 requires metalio47 or all')
-    if args.s31_fast_reader_panels and args.board=='pico':
-        parser.error('--s31-fast-reader-panels requires metalio47 or all')
-    if args.s31_du14 and args.board == 'pico':
-        parser.error('--s31-du14 requires metalio47 or all')
-    if args.s31_settings_short_motion and args.board == 'pico':
-        parser.error('--s31-settings-short-motion requires metalio47 or all')
-    if args.s31_trimmed_waveform and args.board == 'pico':
-        parser.error('--s31-trimmed-waveform requires metalio47 or all')
-    if args.pico_main_clean and args.board == 'metalio47':
-        parser.error('--pico-main-clean requires pico or all')
-    if args.s31_main_clean and args.board == 'pico':
-        parser.error('--s31-main-clean requires metalio47 or all')
-    if args.s31_network_probe and args.board == 'pico':
-        parser.error('--s31-network-probe requires metalio47 or all')
-    if args.s31_transfer_startup_test and args.board == 'pico':
-        parser.error('--s31-transfer-startup-test requires metalio47 or all')
-    if args.s31_early_power_key and args.board=='pico':
-        parser.error('--s31-early-power-key requires metalio47 or all')
     boards = BOARDS if args.board == 'all' else (args.board,)
     if args.list:
         print(json.dumps([metadata(board) for board in boards], ensure_ascii=False, indent=2))

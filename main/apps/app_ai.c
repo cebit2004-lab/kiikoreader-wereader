@@ -2,12 +2,14 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * 中文：AI 助手页。显示对话状态、你说的话和 AI 的回答（自动折行，过长时显示末尾）。对话本身在 ai_voice
- * 后台进行，离开本页继续；AI 键（短按功能设为「AI 助手」时）在任何页面都能开始、打断或结束。
+ * 后台进行，离开本页即结束；AI 键（短按功能设为「AI 助手」时）在别的页面按下会打开本页并开始对话，在本页
+ * 上开始、打断或结束。
  * 流式回答最多每 1.5 秒重绘一次，照顾墨水屏。
  *
  * English: AI assistant page. Shows the chat state, your words and the AI's reply (wrapped, showing the
- * tail when long). The chat runs in ai_voice and continues after leaving; the AI key (with its short
- * action set to "AI assistant") starts, interrupts or ends it from any page. A streaming reply
+ * tail when long). The chat runs in ai_voice and ends on leaving this page; the AI key (with its short
+ * action set to "AI assistant") opens this page and starts a chat from elsewhere, and starts,
+ * interrupts or ends it here. A streaming reply
  * redraws at most every 1.5 s, sparing the e-paper.
  */
 #include <stdio.h>

@@ -183,9 +183,7 @@ bool ui_click_feedback_nav_tick(uint8_t *fb,int64_t now_ms,EpdRect *area) {
         // 书架正等待封面时新帧尚未注册底栏；按稳定公共布局反馈，不能等待目标页出现。
         // While shelf covers load, the new frame may lack registrations; use the stable common footer immediately.
         static const ui_icon_t tabs[]={UI_ICON_HOUSE,UI_ICON_LIBRARY_BIG,
-#if KIIKO_BOARD_METALIO47
             UI_ICON_BOOK_OPEN,
-#endif
             UI_ICON_FOLDER_OPEN,UI_ICON_SLIDERS_HORIZONTAL};
         int center=(s_nav.tab*2+1)*UI_LOCK_WIDTH/(2*UI_TAB_COUNT);
         s_active=control?*control:(click_control_t){(EpdRect){center-30,UI_NAV_TOP+15,60,60},UI_CLICK_NAV,tabs[s_nav.tab]};

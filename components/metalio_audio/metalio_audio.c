@@ -60,6 +60,38 @@ static volatile uint32_t s_tx_underflows;  // 只由中断递增 / incremented b
 static volatile uint32_t *s_uf_us;
 static bool s_capture;                  // 当前是否开了麦克风通道 / microphone channel open
 static bool s_tx32;                     // 发送用 32 位数据（与麦克风同开时）/ TX uses 32-bit data (when the mic is open)
+// 读写与关闭/重开互斥：读写不拿 s_i2s_lock（录音与放音要并行），而是登记在 s_io_users；关闭或重开前
+// 先置 s_io_closing 挡住新的读写，再等已在读写的退出。读写在每块之间看 s_io_closing，所以关闭最多等
+// 调用方给的一块等待时间。
+// Read/write versus close/reopen: read and write do not take s_i2s_lock (capture and playback must
+// run in parallel) but register in s_io_users. Close or reopen first sets s_io_closing to turn new
+// I/O away, then waits for I/O in progress to leave. Read and write check s_io_closing between
+// chunks, so close waits at most one chunk's wait time as given by the caller.
+static _Atomic int s_io_users;
+static _Atomic bool s_io_closing;
+
+static bool io_enter(void) {
+    atomic_fetch_add(&s_io_users, 1);
+    if (!atomic_load(&s_io_closing)) return true;
+    atomic_fetch_sub(&s_io_users, 1);
+    return false;
+}
+static void io_leave(void) { atomic_fetch_sub(&s_io_users, 1); }
+
+// 持 s_i2s_lock 时调用：挡住新读写并等现有的退出。/ Call holding s_i2s_lock: block new I/O and wait out current I/O.
+static void io_quiesce(void) {
+    atomic_store(&s_io_closing, true);
+    const int64_t t0 = esp_timer_get_time();
+    bool logged = false;
+    while (atomic_load(&s_io_users) > 0) {
+        if (!logged && esp_timer_get_time() - t0 > 2000000) {
+            ESP_LOGW(TAG, "close: waiting for %d I2S user(s)", atomic_load(&s_io_users));
+            logged = true;
+        }
+        vTaskDelay(1);
+    }
+}
+static void io_resume(void) { atomic_store(&s_io_closing, false); }
 
 // ---------------------------------------------------------------- UART / AT
 
@@ -312,7 +344,11 @@ esp_err_t metalio_audio_open(int sample_rate, bool capture) {
     if (!metalio_audio_wait_ready(5000)) return ESP_ERR_INVALID_STATE;
     if (xSemaphoreTake(s_i2s_lock, pdMS_TO_TICKS(1000)) != pdTRUE) return ESP_ERR_TIMEOUT;
     esp_err_t err = ESP_OK;
+    bool quiesced = false;
     if (s_tx && s_rate == sample_rate && (s_capture || !capture)) goto done;
+    // 重开期间（含测时钟，它也用发送缓冲）不许读写。/ No I/O while reopening (the clock measurement uses the TX buffer too).
+    io_quiesce();
+    quiesced = true;
     close_locked();
     log_heap("i2s before");
     // BH1098G V1.03 不支持 AT+SAMPLE（回 AT ERROR），时钟固定 16 kHz；其他采样率由调用方重采样。
@@ -357,6 +393,7 @@ esp_err_t metalio_audio_open(int sample_rate, bool capture) {
         s_actual_rate = measure_rate_locked();
     } else close_locked();
 done:
+    if (quiesced) io_resume();
     xSemaphoreGive(s_i2s_lock);
     ESP_LOGI(TAG, "i2s open %d Hz capture=%d: %s", sample_rate, capture, esp_err_to_name(err));
     log_heap("i2s after");
@@ -367,8 +404,13 @@ void metalio_audio_close(void) {
     metalio_audio_set_pa(false);
     if (!s_i2s_lock) return;
     xSemaphoreTake(s_i2s_lock, portMAX_DELAY);
+    io_quiesce();  // 正在读写的最多再用一块的等待时间 / I/O in progress takes one chunk's wait at most
     close_locked();
+    io_resume();
     xSemaphoreGive(s_i2s_lock);
+    // 关之前最后一次写入可能又开了功放；通道已关，再关一次就不会再被打开。/ A last write before the close
+    // may have turned the amplifier back on; with the channel gone, switching it off now sticks.
+    metalio_audio_set_pa(false);
     // BH 保持模式 1（共享电源不断），只释放串口驱动。/ The BH stays in mode 1 (shared rail on); only the UART driver goes.
     uart_down();
 }
@@ -388,7 +430,9 @@ void metalio_audio_set_pa(bool on) {
 }
 
 int metalio_audio_write(const int16_t *mono, size_t samples, TickType_t wait) {
-    if (!s_tx || !mono) return -1;
+    if (!mono || !io_enter()) return -1;
+    i2s_chan_handle_t tx = s_tx;
+    if (!tx) { io_leave(); return -1; }
     metalio_audio_set_pa(true);
     // 平方曲线音量，Q16。/ Square-law volume in Q16.
     const int v = s_volume;
@@ -409,21 +453,25 @@ int metalio_audio_write(const int16_t *mono, size_t samples, TickType_t wait) {
             }
         }
         size_t bytes = 0;
-        esp_err_t err = i2s_channel_write(s_tx, s_txbuf, n * TX_FRAME_BYTES, &bytes, wait);
+        esp_err_t err = i2s_channel_write(tx, s_txbuf, n * TX_FRAME_BYTES, &bytes, wait);
         done += bytes / TX_FRAME_BYTES;
-        if (err != ESP_OK) break;
+        // 有人要关：交还通道，别让关闭等完整段。/ A close is waiting: let go rather than make it wait for the whole call.
+        if (err != ESP_OK || atomic_load(&s_io_closing)) break;
     }
+    io_leave();
     return (int)done;
 }
 
 int metalio_audio_read(int16_t *mono, size_t samples, TickType_t wait) {
-    if (!s_rx || !mono) return -1;
+    if (!mono || !io_enter()) return -1;
+    i2s_chan_handle_t rx = s_rx;
+    if (!rx) { io_leave(); return -1; }
     size_t done = 0;
-    while (done < samples) {
+    while (done < samples && !atomic_load(&s_io_closing)) {
         size_t n = samples - done;
         if (n > CHUNK_FRAMES) n = CHUNK_FRAMES;
         size_t bytes = 0;
-        esp_err_t err = i2s_channel_read(s_rx, s_rxbuf, n * 2 * sizeof(int32_t), &bytes, wait);
+        esp_err_t err = i2s_channel_read(rx, s_rxbuf, n * 2 * sizeof(int32_t), &bytes, wait);
         size_t frames = bytes / (2 * sizeof(int32_t));
         for (size_t i = 0; i < frames; ++i) {
             // 麦克风在左槽。/ Microphone on the left slot.
@@ -433,6 +481,7 @@ int metalio_audio_read(int16_t *mono, size_t samples, TickType_t wait) {
         done += frames;
         if (err != ESP_OK || frames == 0) break;
     }
+    io_leave();
     return (int)done;
 }
 

@@ -25,27 +25,19 @@ typedef enum {
 
 void app_settings_init(void);
 app_sleep_mode_t app_settings_sleep_mode(void);
-#if KIIKO_BOARD_METALIO47
 // APP_AI_ASSISTANT 追加在末尾，已保存的取值不变。/ APP_AI_ASSISTANT is appended so saved values keep their meaning.
 typedef enum {APP_AI_REFRESH,APP_AI_BOOKMARK,APP_AI_FRONTLIGHT,APP_AI_HOME,APP_AI_NONE,APP_AI_ASSISTANT,APP_AI_ACTION_COUNT} app_ai_action_t;
 /// AI键短按独立保存在S31设置；仅成功提交才改变当前映射。/ Persist S31 AI taps, changing the live mapping only after a successful commit.
 app_ai_action_t app_settings_ai_short(void);
 esp_err_t app_settings_set_ai_short(app_ai_action_t action);
-#else
-#endif
 void app_settings_set_sleep_mode(app_sleep_mode_t mode);
 const char* app_sleep_mode_name(app_sleep_mode_t mode);
-#if KIIKO_BOARD_METALIO47
 typedef enum {APP_LOCK_SLEEP_TIMED, APP_LOCK_SLEEP_OFF, APP_LOCK_SLEEP_KEEP_LIGHT} app_lock_sleep_mode_t;
 /// S31锁屏策略；保持浅睡不设置自动断电截止，手动关机独立。/ S31 lock policy; keep-light has no automatic power-off deadline, independent of manual off.
 app_lock_sleep_mode_t app_settings_lock_sleep_mode(void);
 esp_err_t app_settings_set_lock_sleep_mode(app_lock_sleep_mode_t mode);
 bool app_settings_keep_light_sleep(void);
 /// S31关机：默认浅睡十分钟后同步RTC并硬关机；false立即断电，保存后生效。/ S31 syncs RTC and powers off after ten minutes of light sleep; false powers off immediately, effective after saving.
-#else
-/// 电源菜单“关机”：false 为彻底断电，true 为先浅睡 10 分钟再由 PMU 软睡断电。
-/// Power-menu shutdown: false powers fully off; true light-sleeps for 10 minutes, then PMU soft-sleeps.
-#endif
 bool app_settings_staged_shutdown(void);
 void app_settings_set_staged_shutdown(bool staged);
 /// 电源键开机次数：1 单击开机，2 双击开机；默认 1，已保存的选择继续保留。
@@ -213,6 +205,10 @@ void app_settings_set_shelf_recent_sort(bool on);
 /// by default. Turning it off tears the whole stack down and returns NimBLE's memory.
 bool app_settings_ble_turner(void);
 void app_settings_set_ble_turner(bool on);
+/// 本固件是否编入蓝牙（CONFIG_BT_ENABLED）。没有时快捷层的蓝牙键和设置里的翻页器一行只作说明。
+/// Whether this firmware has Bluetooth built in (CONFIG_BT_ENABLED). Without it the quick-layer Bluetooth
+/// key and the page-turner settings row are informational only.
+bool app_settings_ble_available(void);
 /// S31快充：默认开启；关闭回到标准充电电流，切换立即生效并掉电保存。/ S31 fast charge: on by default; off returns to the standard current, and the choice persists.
 bool app_settings_fast_charge(void);
 void app_settings_set_fast_charge(bool on);

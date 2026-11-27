@@ -1,27 +1,27 @@
-# 双板型构建
+# 板型构建
 
-本仓库的 `main` 同时维护 Pico 与 Metalio S31 源码：共享 `main/` 阅读器和 UI，板级驱动与配置由 `boards/` 选择。正式二进制继续在统一 Release 归档，官网按机型选择。现有文件许可与第三方权利保持。
+本仓库只维护 Metalio S31（`metalio47`）一种设备。原 Pico（ESP32-S3）板型已于 2026-11 移除：`boards/pico/`、Pico 专用源码分支、驱动与测试均已删除，需要时请从删除前的 Git 历史取回。`main/` 阅读器和 UI 与 `boards/metalio47/` 的板级驱动、配置一起编译。正式二进制继续在统一 Release 归档，官网按机型选择。现有文件许可与第三方权利保持。
 
 维护同一份 `main/` 阅读器和 UI 源码，通过 `KIIKO_BOARD` 选择设备。`boards/<设备>/` 保存该设备的配置、分区和硬件后端，`cmake/board.cmake` 选择参与编译的驱动。已有 `read_pico_*` 接口名继续作为内部兼容接口使用。
 
 ## 支持的设备
 
-| 编译选项 | `pico` | `metalio47` |
-| --- | --- | --- |
-| 设备 | 原 kiikoread 墨水屏 | Metalio E-INK4 Plus 4.7 V1.5 |
-| 芯片 / 编译器 | ESP32-S3 / Xtensa | ESP32-S31 / RISC-V |
-| 固件项目名 | `Read_Pico` | `Kiikoread_Metalio_S31` |
-| 触摸 | CST836U | FT6336 |
-| 屏幕供电 | 原 CW32 / SY7636A 路径 | TPS65185 / TCA9555 |
-| 波形 | 原 Pico 校准序列 | 原 GC48 / GL48 / DU20 |
-| 应用分区 | 双 4 MiB | 双 5 MiB |
-| bootloader 地址 | `0x0` | `0x2000` |
-| OTA 数据地址 | `0xd10000` | `0xd000` |
-| 设置命名空间 | `read_pico` | `metalio_s31` |
-| 锁屏 / 启动记录空间 | `pico_lock` / `pico_startup` | `metalio_lock` / `metalio_start` |
-| 联网 OTA | 沿用正式版 | 支持，GitHub Pages 优先、官网备用 |
+| 编译选项 | `metalio47` |
+| --- | --- |
+| 设备 | Metalio E-INK4 Plus 4.7 V1.5 |
+| 芯片 / 编译器 | ESP32-S31 / RISC-V |
+| 固件项目名 | `Kiikoread_Metalio_S31` |
+| 触摸 | FT6336 |
+| 屏幕供电 | TPS65185 / TCA9555 |
+| 波形 | 原 GC48 / GL48 / DU20 |
+| 应用分区 | 双 5 MiB |
+| bootloader 地址 | `0x2000` |
+| OTA 数据地址 | `0xd000` |
+| 设置命名空间 | `metalio_s31` |
+| 锁屏 / 启动记录空间 | `metalio_lock` / `metalio_start` |
+| 联网 OTA | 支持，GitHub Pages 优先、官网备用 |
 
-Metalio 仅适用于已适配的 **V1.5 / E0470A14-AF 34Pin** 硬件，不自动推断其他硬件修订。两种设备的原始波形、供电时序、引脚、存储地址及默认配置分别保留；共享功能更新不代表把一块板的底层参数搬到另一块板。
+Metalio 仅适用于已适配的 **V1.5 / E0470A14-AF 34Pin** 硬件，不自动推断其他硬件修订。
 
 两块板共用rc97的凭据读取和紧凑启动记录逻辑：正常可读的已设密码仍验证；读取失败或损坏时不拦启动、可重新读取且禁止覆盖旧凭据。启动记录兼容旧定长格式，空间不足只回收自身旧记录。S31异常启动字体回退、USB交接、前光与睡眠恢复由自身后端保留。
 
@@ -208,56 +208,45 @@ S31 charging uses a fixed black well with a white bolt outline. Detection retain
 
 ## 准备 SDK
 
-需要 Python 环境、ESP-IDF 6.1 及对应工具链。Pico 使用已有的 ESP32-S3 SDK；Metalio 使用已适配 ESP32-S31 的 SDK，必须包含 `components/soc/esp32s31`。普通只支持 S3 的 SDK 不能编译 S31。
+需要 Python 环境、ESP-IDF 6.1 及 RISC-V 工具链。SDK 必须已适配 ESP32-S31（包含 `components/soc/esp32s31`）。
 
 将路径填入环境变量，Python 路径应指向已安装 ESP-IDF Python 依赖的虚拟环境入口：
 
 ```sh
-export KIIKO_IDF_PICO=/path/to/esp-idf-s3
 export KIIKO_IDF_METALIO47=/path/to/esp-idf-s31
 export IDF_TOOLS_PATH=/path/to/idf-tools
 ```
 
-## 一条命令生成两个版本
+## 构建
 
 在源码根目录执行：
 
 ```sh
-python3 tools/build_firmware.py --board all \
+python3 tools/build_firmware.py --board metalio47 \
   --python /path/to/idf-python/bin/python \
   --tools "$IDF_TOOLS_PATH"
 ```
 
-也可以单独选择：
-
-```sh
-python3 tools/build_firmware.py --board pico --python /path/to/idf-python/bin/python
-python3 tools/build_firmware.py --board metalio47 --python /path/to/idf-python/bin/python
-```
-
-`--idf-pico`、`--idf-metalio47` 可代替 SDK 环境变量；`--output` 修改输出目录。离线构建可用 `--managed-pico`、`--managed-metalio47` 指定与各自锁文件匹配的 `managed_components` 缓存。`--dry-run` 显示计划，`--board all --list` 显示支持的设备。工具仅编译和打包，不打开串口。
+`--idf-metalio47` 可代替 SDK 环境变量；`--output` 修改输出目录。离线构建可用 `--managed-metalio47` 指定与锁文件匹配的 `managed_components` 缓存。`--dry-run` 显示计划，`--board all --list` 显示支持的设备。工具仅编译和打包，不打开串口。
 
 构建器从同一维护源码生成独立的临时设备视图，分开保存配置、依赖、CMake 缓存、日志及产物：
 
 ```text
 build/boards/
-  pico/{source,build,sdkconfig,build.log}
   metalio47/{source,build,sdkconfig,build.log}
-  packages/pico/
   packages/metalio47/
-  packages/kiikoread-pico-<版本>-USB.zip
   packages/kiikoread-metalio47-<版本>-USB.zip
 ```
 
-日常修改应改维护源码 `main/`、`components/` 或相应 `boards/<设备>/src/`，不要修改生成的 `build/boards/<设备>/source/`。共用功能不再分别维护两套应用目录；仅硬件、驱动和有明确平台差异的行为选择分支。
+日常修改应改维护源码 `main/`、`components/` 或相应 `boards/<设备>/src/`，不要修改生成的 `build/boards/<设备>/source/`。
 
-图标由同一个生成器维护：`python3 tools/gen_ui_icons.py --board all` 更新两块板的生成头文件；也可只指定一种设备。保留原图标枚举顺序和 Metalio 的前光图标，生成器不会覆盖共享的图标选择头。
+图标由同一个生成器维护：`python3 tools/gen_ui_icons.py --board metalio47` 更新生成头文件。保留原图标枚举顺序和 Metalio 的前光图标，生成器不会覆盖共享的图标选择头。
 
 ## CMake 选择层
 
-构建器将 `-DKIIKO_BOARD=pico|metalio47`、对应 `IDF_TARGET`、sdkconfig 和依赖锁文件交给各自的 ESP-IDF。生产源码中的条件分支由真实 C 编译器处理。请用上面的构建器隔离依赖锁和 SDK 缓存；不要在维护源码根目录轮换两个 SDK 并共用根 sdkconfig。板型和目标冲突、未知板型会在配置阶段报错。
+构建器将 `-DKIIKO_BOARD=metalio47`、`IDF_TARGET`、sdkconfig 和依赖锁文件交给 ESP-IDF。未知板型会在配置阶段报错。
 
-CI 对两块板各跑一轮构建和宿主测试（`matrix.board: [pico, metalio47]`），`tools/board_layer_host_test.py` 校验 board.json、板级 sdkconfig、分区表、CI 矩阵与本文档互相对得上。板级配置、分区表和依赖锁只保留在 `boards/<设备>/`；仓库根不再有 `sdkconfig.defaults`、`sdkconfig.ci` 或 `partitions*.csv` 副本。
+CI 跑一轮构建和宿主测试（`matrix.board: [metalio47]`），`tools/board_layer_host_test.py` 校验 board.json、板级 sdkconfig、分区表、CI 矩阵与本文档互相对得上。板级配置、分区表和依赖锁只保留在 `boards/<设备>/`；仓库根不再有 `sdkconfig.defaults`、`sdkconfig.ci` 或 `partitions*.csv` 副本。
 
 ## 交付与验证
 
@@ -271,14 +260,11 @@ CI 对两块板各跑一轮构建和宿主测试（`matrix.board: [pico, metalio
 
 ```sh
 python3 tools/board_layer_host_test.py
-python3 tools/board_selection_host_test.py
-python3 tools/board_selection_host_test.py --build-root build/boards
 
-python3 tools/board_source_view.py --board pico --tests --output build/host/pico
 python3 tools/board_source_view.py --board metalio47 --tests --output build/host/metalio47
 ```
 
-在相应生成的主机测试视图中运行现有测试。Pico 包括 `run_water_turn_host_test.sh`、`run_display_host_test.sh`、`reader_spacing_host_test.py`、`test_book_toc.py`、`lock_pin_host_test.py`；Metalio 还必须运行 `run_metalio_host_test.sh` 和 `run_metalio_ota_host_test.sh`，其专用夹具随测试视图自动选择。
+在生成的主机测试视图中运行现有测试，例如 `run_water_turn_host_test.sh`、`run_display_host_test.sh`、`reader_spacing_host_test.py`、`lock_pin_host_test.py`，并必须运行 `run_metalio_host_test.sh` 和 `run_metalio_ota_host_test.sh`，其专用夹具随测试视图自动选择。
 
 子页布局按1216px可用高度定位：文件目录列表扩展，目录设置/移动按钮与分页贴底，系统输入键盘底部留26px；绘制、点击和局部刷新共用几何。字体列表与书架样式预览使用完整子页视口，传输底部按钮随视口下移。Pico保留原布局。
 
@@ -364,16 +350,6 @@ English: Explicit local S31 root scope chooses eight changed-white phases when e
 两机共用产品默认：液态玻璃书架（样式6）、Moon Clock（组件4）、首页强刷开启。只有缺失或无效设置才使用默认；保留已保存的有效样式/组件，以及明确关闭首页强刷的选择。旧书架迁移标记仅补齐记录，不再强制把已保存的样式改为亚克力；已删除的3/4样式仍按既有规则回退2。刷机保留数据时不会清除已有选择；旧配置备份恢复继续按其记录执行。
 
 English: Both boards default to liquid-glass shelf6, Moon Clock4 and Home full refresh ON only when unconfigured/invalid. Preserve valid saved choices and explicit OFF, including across retained-data flashing and backup restore. The legacy shelf marker no longer overwrites valid styles; retired3/4 still map to2.
-
-### Pico 主页面擦白实验 / Pico root-whitening experiment
-
-`--pico-main-clean` 单独启用，默认OFF，S31单板命令拒绝；与S31的`--s31-main-clean`分开配置。两机清单均记录各自的`experimental_main_clean`。只在四个可见根页之间真正切换时选择，首次进入、同页更新、阅读/子页/菜单/锁屏、首页强刷和手动/周期/失败全刷保留原出口。
-
-Pico派生其本机DU20/书架出口24/GL37：切换来源或目标是书架时补八相，其余根页之间补六相。保留原非等值动作，将补白插在原末尾保持之前；没有末尾保持的源再补一相释放。灰阶目标不量化，等值像素全部保持。GL37分别合43/45相，DU20合26/28相；书架退出原24相加8相及1保持为33相。书架内翻页、列表滚动和正文保留各自出口，不继承根页切换许可。
-
-条带引擎上限45相，8带紧凑切换分别50/52拍；阅读水波纹仍41相。扫描节拍、电压/供电、底栏裁剪和方向不变，不采用S31数据。普通/水波纹根页合并底部指示条，快刷灰阶带保留；补白在同轮输出，无新增全刷轮次。六个源表各缓存六/八两种力度，最多12×45×64=34560字节PSRAM加元数据，条带展开缓存最多45KiB；不新增整帧。OOM、缓存满或不兼容源回退原表，重复调用及力度切换都不叠加相数。设置列表独立45相（补八相），首页强刷和手动/周期/故障全刷优先，光学改善与实际延迟仍需实屏比较。
-
-English: Explicit local `--pico-main-clean` remains OFF by default and scoped to changed visible root tabs. Either source or destination being the shelf selects eight changed-white phases; other root pairs select six. Retain native changed-pixel actions and settling, hold all equal pairs, and add one release only when a source has no settling. GL37 totals43/45, DU20 totals26/28, and the24-phase shelf exit totals33 with eight drives and one release. Shelf pagination, list scrolling and reading retain independent outlets. The band cap is45 (50/52 compact ticks over eight bands); reader ripple remains41. Preserve timing, voltage/power, navigation and direction; never import S31 LUTs. Two strengths per six sources use at most34560B external LUT data plus metadata, and the band expansion uses at most45KiB; no extra frame or clear pass. Cache keys include strength, derived inputs rebase instead of stacking, and OOM/capacity/incompatibility retain the source. Settings lists keep their own45-phase profile and full/manual/periodic/fault outputs retain priority. Hardware acceptance is still required.
 
 ## S31阅读差分更新（2026-10-29） / S31 reader differences
 

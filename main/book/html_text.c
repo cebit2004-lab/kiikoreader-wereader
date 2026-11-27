@@ -1042,14 +1042,12 @@ esp_err_t html_to_blocks_with_css_notes(const char* html, size_t len,
     return parse_html(html,len,css,css_len,fonts,anchor,source_offset,ext,ext_count,text_offset,out,false,0,NULL);
 }
 
-#if KIIKO_BOARD_METALIO47
 bool html_weread_position(const char *html, size_t len, bool to_cloud, unsigned position, unsigned *mapped) {
     html_text_t text = {0};
     bool ok = parse_html(html,len,NULL,0,NULL,NULL,SIZE_MAX,NULL,0,NULL,&text,to_cloud,position,mapped) == ESP_OK;
     html_text_free(&text);
     return ok && *mapped != UINT32_MAX;
 }
-#endif
 
 esp_err_t html_to_blocks_with_css_target(const char* html, size_t len,
                                           const char* css, size_t css_len,

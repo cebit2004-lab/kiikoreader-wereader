@@ -8,11 +8,7 @@ static void rc_stop_auto(void){reader_auto_stop(&s_rc_auto);s_rc_auto_waiting=fa
 void app_book_pause_auto(void){rc_pause_auto();}
 static void rc_notice(app_ctx_t*ctx,const char*text){copy_text(s_reader_notice,sizeof(s_reader_notice),text);s_reader_notice_until=ctx->now_ms+1800;}
 static void rc_invalidate(void){
-#if KIIKO_BOARD_METALIO47
     pause_reader_prep();
-#else
-    invalidate_prep();
-#endif
 }
 static app_redraw_t rc_open(app_ctx_t*ctx,reader_panel_t panel){
     rc_pause_auto();s_rc_menu_slot=-1;s_rc_double_pending=false;s_reader_tap.pending=false;s_reader_slider=-1;s_pressed_control=-1;
@@ -58,10 +54,8 @@ static app_redraw_t rc_execute(app_ctx_t*ctx,unsigned action){
     case RC_LAYOUT:return rc_open(ctx,READER_PANEL_LAYOUT_SETTINGS);
     case RC_DISPLAY:return rc_open(ctx,READER_PANEL_READING_DISPLAY);
     case RC_TURN_SETTINGS:return rc_to_root(ctx,1);
-#if KIIKO_BOARD_METALIO47
     case RC_LIGHT:metalio_frontlight_toggle();rc_notice(ctx,metalio_frontlight_enabled()?"前光已开启":"前光已关闭");return APP_REDRAW_PAGE;
     case RC_BRIGHTNESS:case RC_WARMTH:s_rc_light_warm=action==RC_WARMTH;return rc_open(ctx,READER_PANEL_READING_LIGHT);
-#endif
     default:return APP_REDRAW_NONE;
     }
 }
@@ -125,9 +119,7 @@ static app_redraw_t rc_panel_action(app_ctx_t*ctx,int x,int y,bool*handled){
         for(int i=0;i<3;++i)if(ui_rect_hit(rc_effect_rect(i),x,y)){app_settings_set_reader_turn_effect(i);s_turns=0;rc_invalidate();return APP_REDRAW_PAGE;}
         if(ui_rect_hit(rc_refresh_rect(),x,y)){
             static const uint8_t values[]={0,5,10,15,
-#if KIIKO_BOARD_METALIO47
                 20,
-#endif
                 30};
             unsigned n=sizeof(values)/sizeof(values[0]),i=0;for(;i<n;++i)if(values[i]==app_settings_reader_full_pages())break;
             app_settings_set_reader_full_pages(values[(i+1)%n]);s_turns=0;return APP_REDRAW_PAGE;
@@ -404,16 +396,13 @@ static int rc_hit_target(int x,int y){
     return -1;
 }
 static void rc_cancel_side(void){
-#if KIIKO_BOARD_METALIO47
     if(s_rc_side_active&&s_rc_side_captured)metalio_frontlight_restore();
-#endif
     s_rc_side_active=s_rc_side_captured=false;
 }
 static app_redraw_t rc_gesture(app_ctx_t*ctx,const ui_gesture_event_t*ev,bool*handled){
     *handled=false;
     if(rc_custom_modal()){
         *handled=true;rc_pause_auto();
-#if KIIKO_BOARD_METALIO47
         if(s_reader_panel==READER_PANEL_READING_LIGHT){
             EpdRect slider=rc_light_slider_rect();
             if(ev->type==UI_GESTURE_PRESS)s_rc_light_drag=ui_rect_hit(slider,ev->x0,ev->y0);
@@ -425,7 +414,6 @@ static app_redraw_t rc_gesture(app_ctx_t*ctx,const ui_gesture_event_t*ev,bool*ha
                 render(ctx,ctx->fb);s_area=(EpdRect){36,930,612,120};s_mode=MODE_GL16;return APP_REDRAW_AREA;
             }
         }
-#endif
         if(ev->type==UI_GESTURE_PRESS){s_rc_press_target=rc_hit_target(ev->x0,ev->y0);return APP_REDRAW_NONE;}
         if(ev->type==UI_GESTURE_TAP){int end=rc_hit_target(ev->x,ev->y);if(end>=0&&end==s_rc_press_target){bool used;return rc_panel_action(ctx,ev->x,ev->y,&used);}}
         return APP_REDRAW_NONE;
@@ -439,9 +427,7 @@ static app_redraw_t rc_gesture(app_ctx_t*ctx,const ui_gesture_event_t*ev,bool*ha
         if(ev->y0>=176&&ev->y0<1096&&(ev->x0<56||ev->x0>=628)){
             s_rc_side_index=ev->x0>=628;s_rc_side_action=app_settings_reader_controls()->sides[s_rc_side_index];
             s_rc_side_active=s_rc_side_action!=RC_SIDE_OFF;s_rc_side_value=s_rc_side_action==RC_SIDE_FONT?s_px:app_settings_book_line_spacing();
-#if KIIKO_BOARD_METALIO47
             if(s_rc_side_action==RC_SIDE_BRIGHTNESS||s_rc_side_action==RC_SIDE_WARMTH)s_rc_side_value=metalio_frontlight_position(s_rc_side_action==RC_SIDE_WARMTH);
-#endif
             s_rc_side_start=s_rc_side_value;
         }
     }
@@ -454,15 +440,11 @@ static app_redraw_t rc_gesture(app_ctx_t*ctx,const ui_gesture_event_t*ev,bool*ha
         if(s_rc_side_action==RC_SIDE_LINE){min=110;max=150;step=24;}
         int value=s_rc_side_start-dy/step;if(value<min)value=min;if(value>max)value=max;
         bool changed=value!=s_rc_side_value;s_rc_side_value=value;
-#if KIIKO_BOARD_METALIO47
         if((s_rc_side_action==RC_SIDE_BRIGHTNESS||s_rc_side_action==RC_SIDE_WARMTH)&&changed)
             metalio_frontlight_preview_position(s_rc_side_action==RC_SIDE_BRIGHTNESS?value:metalio_frontlight_position(false),s_rc_side_action==RC_SIDE_WARMTH?value:metalio_frontlight_position(true));
-#endif
         if(ev->type!=UI_GESTURE_MOVE&&ev->type!=UI_GESTURE_PRESS){
             s_rc_side_active=s_rc_side_captured=false;
-#if KIIKO_BOARD_METALIO47
             if(s_rc_side_action==RC_SIDE_BRIGHTNESS||s_rc_side_action==RC_SIDE_WARMTH)metalio_frontlight_commit();
-#endif
             if(s_rc_side_action==RC_SIDE_FONT)return apply_reader_layout(ctx,value,s_margin,app_settings_book_line_spacing(),app_settings_book_paragraph_spacing());
             if(s_rc_side_action==RC_SIDE_LINE)return apply_reader_layout(ctx,s_px,s_margin,value,app_settings_book_paragraph_spacing());
             return APP_REDRAW_PAGE;

@@ -134,8 +134,17 @@ static int wrap(uint8_t *fb, int x, int y, int w, int px, const char *text, int 
         snprintf(trial, sizeof(trial), "%s%.*s", line, (int)(q - p), p);
         if (line[0] && ui_text_fixed_width_px(px, trial) > w) {
             if (lines == max_lines - 1) {
-                const size_t len = strlen(line);
-                snprintf(line + len, sizeof(line) - len, "…");
+                // 先量好再加省略号：放不下就从行尾退掉整字。/ Measure first: drop whole characters from the
+                // end until the line plus the ellipsis fits.
+                size_t len = strlen(line);
+                for (;;) {
+                    while (len && line[len - 1] == ' ') line[--len] = 0;
+                    snprintf(trial, sizeof(trial), "%s…", line);
+                    if (!len || ui_text_fixed_width_px(px, trial) <= w) break;
+                    do --len; while (len && ((unsigned char)line[len] & 0xc0) == 0x80);
+                    line[len] = 0;
+                }
+                snprintf(line, sizeof(line), "%s", trial);
                 p = "";
                 break;
             }
@@ -255,7 +264,8 @@ static void render_home(uint8_t *fb) {
         vocab_scope_stats((vocab_scope_t){up.first, down.first + down.count - up.first}, &gs);
         snprintf(line, sizeof(line), "全年 %d 词 · 已学 %d", gs.total, gs.learned);
         ui_text_box(fb, (EpdRect){r.x + 12, r.y + 58, 280, 26}, 19, line, EPD_DRAW_ALIGN_LEFT, false);
-        for (int t = 0; t < 2; ++t) chip(fb, term_chip(g, t), t ? "下册" : "上册", false, 26);
+        // 没有下册就不画它。/ No lower-term chip when that book does not exist.
+        for (int t = 0; t < 2 && b + t < books.first + books.count; ++t) chip(fb, term_chip(g, t), t ? "下册" : "上册", false, 26);
         ui_hairline(fb, r.y + r.height - 1, r.x, r.width, 0xc0);
     }
 }
@@ -318,7 +328,8 @@ static app_redraw_t home_tap(int x, int y) {
                 open_book(b + t);
                 return APP_REDRAW_PAGE;
             }
-        const vocab_scope_t up = vocab_book_lists(b), down = vocab_book_lists(b + 1);
+        // 和绘制一样收住：没有下册时全年就是上册。/ Clamped like the render: without a lower term the year is one book.
+        const vocab_scope_t up = vocab_book_lists(b), down = vocab_book_lists(b + 1 < books.first + books.count ? b + 1 : b);
         vocab_set_scope((vocab_scope_t){up.first, down.first + down.count - up.first});
         return APP_REDRAW_PAGE;
     }

@@ -43,9 +43,7 @@
 #include "book_progress.h"
 #include "book_title.h"
 #include "display.h"
-#if KIIKO_BOARD_METALIO47
 #include "display_main_waveform.h"
-#endif
 #include "e0470_epaper_waveform.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -73,9 +71,7 @@ static const char* TAG = "transfer_page";
 static book_store_root_t s_root;
 static read_pico_transfer_status_t s_status;
 static bool s_start_pending, s_settle, s_any_changed;
-#if KIIKO_BOARD_METALIO47
 static bool s_progress_pending;
-#endif
 static bool s_media_lost;
 static int s_pressed = -1;
 static read_pico_transfer_mode_t s_mode = READ_PICO_TRANSFER_MODE_AP;
@@ -87,9 +83,7 @@ static EpdRect s_area;
 static bool s_qr_url, s_qr_ready;
 static char s_usb_message[96];
 static bool s_usb_requested, s_wifi_setup_requested, s_wifi_settings_only;
-#if KIIKO_BOARD_METALIO47
 static bool s_wifi_return_on_connect;
-#endif
 static bool s_wifi_upload_requested, s_hotspot_requested, s_direct_entry, s_usb_entry;
 static bool s_usb_start_pending;
 static int64_t s_usb_retry_ms;
@@ -158,18 +152,14 @@ void app_transfer_request_usb_start(void) {
 }
 
 void app_transfer_request_wifi_setup(void) {
-#if KIIKO_BOARD_METALIO47
     s_wifi_return_on_connect = false;
-#endif
     s_wifi_setup_requested = true;
     s_wifi_settings_only = true;
 }
-#if KIIKO_BOARD_METALIO47
 void app_transfer_request_wifi_then_return(void) {
     app_transfer_request_wifi_setup();
     s_wifi_return_on_connect = true;
 }
-#endif
 
 void app_transfer_request_wifi_upload(void) {
     s_wifi_upload_requested = true;
@@ -498,13 +488,11 @@ static app_redraw_t network_ui_tick(app_ctx_t* ctx) {
         bool changed = next.state != s_status.state || next.network_ready != s_status.network_ready ||
                        next.last_error != s_status.last_error;
         s_status = next;
-#if KIIKO_BOARD_METALIO47
         if (s_wifi_return_on_connect && s_status.network_ready) {
             s_wifi_return_on_connect = false;
             ctx->request_return = true;
             return APP_REDRAW_NONE;
         }
-#endif
         if (s_status.network_ready) snprintf(s_network_message, sizeof(s_network_message), "连接成功");
         else if (s_status.state == READ_PICO_TRANSFER_ERROR) snprintf(s_network_message, sizeof(s_network_message), "连接失败，请检查密码或信号");
         return changed ? APP_REDRAW_PAGE : APP_REDRAW_NONE;
@@ -716,13 +704,11 @@ static app_redraw_t provisioning_gesture(app_ctx_t* ctx, const ui_gesture_event_
 }
 
 static EpdRect status_rect(void) { return (EpdRect){36, 676, 612, 270}; }
-#if KIIKO_BOARD_METALIO47
 // Only the live text and bar; exclude the card border, capacity and controls.
 static EpdRect progress_rect(void) {
     EpdRect r = status_rect();
     return (EpdRect){r.x + 24, r.y + 18, r.width - 48, 150};
 }
-#endif
 static uint64_t free_bytes(void* arg) { return book_store_free_bytes(arg); }
 
 static void draw_status(uint8_t* fb) {
@@ -871,9 +857,7 @@ static void render_content(app_ctx_t* ctx, uint8_t* fb) {
 }
 static void render(app_ctx_t *ctx,uint8_t *fb) {
     render_content(ctx,fb);
-#if KIIKO_BOARD_METALIO47
     display_monochrome_content(fb);
-#endif
     transfer_navigation(fb,s_wifi_settings_only?UI_TAB_SETTINGS:UI_TAB_FILES);
 }
 
@@ -905,9 +889,7 @@ static void on_enter(app_ctx_t* ctx) {
     s_session_started = false;
     s_pressed = -1;
     s_settle = s_any_changed = false;
-#if KIIKO_BOARD_METALIO47
     s_progress_pending = false;
-#endif
     s_status.mode = s_mode;
     read_pico_transfer_get_saved_wifi(s_status.wifi_ssid, &s_status.wifi_configured);
     s_poll_ms = 0;
@@ -1088,7 +1070,6 @@ static app_redraw_t on_tick(app_ctx_t* ctx) {
     read_pico_transfer_service_poll();
     read_pico_transfer_status_t next = {0};
     read_pico_transfer_get_status(&next);
-#if KIIKO_BOARD_METALIO47
     // At most one small DU difference every two seconds, including new files.
     // Keep a failed scan pending so an unchanged receive snapshot can retry.
     if (next.state == READ_PICO_TRANSFER_UPLOADING) {
@@ -1106,14 +1087,6 @@ static app_redraw_t on_tick(app_ctx_t* ctx) {
         return APP_REDRAW_AREA;
     }
     s_progress_pending = false;
-#else
-    // Other boards retain their existing upload refresh policy.
-    if (next.state == READ_PICO_TRANSFER_UPLOADING && s_status.state == READ_PICO_TRANSFER_UPLOADING) {
-        s_status.cur_bytes = next.cur_bytes;
-        s_status.sta_count = next.sta_count;
-        return APP_REDRAW_NONE;
-    }
-#endif
     if (s_status.state == READ_PICO_TRANSFER_ERROR && next.state == READ_PICO_TRANSFER_STOPPED) return APP_REDRAW_NONE;
     bool network_changed = next.network_ready != s_status.network_ready ||
         next.mode != s_status.mode || strcmp(next.ssid, s_status.ssid) ||
@@ -1272,7 +1245,6 @@ static app_redraw_t on_key(app_ctx_t *ctx, int key) {
 
 static bool present(app_ctx_t* ctx, app_redraw_t redraw) {
     if (redraw != APP_REDRAW_AREA) return false;
-#if KIIKO_BOARD_METALIO47
     if (s_view == TRANSFER_HOME && s_progress_pending) {
         int err = update_display_area_diff_with(ctx->hl,
             display_main_bw_waveform(), MODE_DU, s_area);
@@ -1280,7 +1252,6 @@ static bool present(app_ctx_t* ctx, app_redraw_t redraw) {
         if (!err) s_progress_pending = false;
         return true;
     }
-#endif
     if (s_view == TRANSFER_PASSWORD) {
         if (s_input_settle) {
             guard_draw_result(ctx->hl, update_display_area_full_with(ctx->hl, &E0470_WAVEFORM, MODE_GL16, s_area));

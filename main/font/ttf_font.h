@@ -74,7 +74,6 @@ void ttf_font_close_embedded(void);
 esp_err_t ttf_font_init(void);
 esp_err_t ttf_font_open(const char* path);
 esp_err_t ttf_font_open_builtin(void);
-#if KIIKO_BOARD_METALIO47
 #include <stdatomic.h>
 typedef struct ttf_font_prepared ttf_font_prepared_t;
 /// 后台准备独立字体，失败不动活动槽；取消在每次文件读取前检查。
@@ -90,8 +89,6 @@ void ttf_font_prepared_free(ttf_font_prepared_t *prepared);
 /// Draw a centered name using the active face or an empty temporary slot; caller holds the draw lock.
 bool ttf_font_draw_preview(const char *path, uint8_t *fb, int x, int y, int px,
                            const char *text, int width);
-#else
-#endif
 bool ttf_font_is_builtin(void);
 bool ttf_font_path_is_builtin(const char* path);
 void ttf_font_unload(void);
@@ -209,11 +206,8 @@ void ttf_font_cache_clear(void);
 size_t ttf_font_cache_clear_all(void);
 void ttf_bench_begin(void);
 void ttf_bench_end(ttf_bench_stats_t* out);
-#if KIIKO_BOARD_METALIO47
 
 /// 浅睡保留字库/字形缓存和槽位，只暂停 TF 文件句柄。/ Keep faces/glyph caches while pausing TF handles.
 esp_err_t ttf_font_suspend_io(void);
 bool ttf_font_io_pending(void);
 esp_err_t ttf_font_resume_io(void);
-#else
-#endif

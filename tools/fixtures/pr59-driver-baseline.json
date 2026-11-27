@@ -25,24 +25,6 @@
     "boards/metalio47/src/main/display_main_waveform.c": "a3be7d442fe90729b8f19dba912ff620fbec1d0b82d860c046ede35ebb12c10d",
     "boards/metalio47/src/main/display_reader_waveform.c": "118572944cef6a659b14059d6aa360a509dacc2afc7d3c94e1767f7d3c1626a1",
     "boards/metalio47/src/main/sleep.c": "600a375c5d22aed831e78d32cd3f40320ba8c7cdc3fe98d2fa0b0f5130291f25",
-    "boards/pico/src/components/e0470_epaper_waveform/e0470_epaper_waveform.c": "e826baa108562fee057d48f3c818c3663d56119d614d78d15963c2568ec5ed7a",
-    "boards/pico/src/components/e0470_page_turn/e0470_page_turn.c": "c1552226485aa2c93c7ded099e93635417948ccecbe58aef9ac1b063c05d5503",
-    "boards/pico/src/components/epdiy/src/board/epd_board.c": "ad2bceb4d0bd8bbeea01124dc373bc03113cac16361c34cee39516f9c32dadcc",
-    "boards/pico/src/components/epdiy/src/displays.c": "11fee89466efb88a6b44d96653627ed192f79b99d0eff2a59d40f510e3630429",
-    "boards/pico/src/components/epdiy/src/epdiy.c": "57f32184b042a957ae32be02af1da25fefe715abd2bfad0ef460b4d29ea5f465",
-    "boards/pico/src/components/epdiy/src/output_common/lut.c": "c18088a11bd005874fdf08382df3ecf8fe600ebdefdcf59e2a21e6e987bb0b6a",
-    "boards/pico/src/components/epdiy/src/output_common/render_context.c": "b5eeb6eddc4ce95d345af99c53e4b49160417fefc57758a288f9f5def4055281",
-    "boards/pico/src/components/epdiy/src/output_lcd/lcd_driver.c": "7287dffa1d5380b94b36076493a81b9607ca108c9f677e89cf9b932f22628b0c",
-    "boards/pico/src/components/epdiy/src/output_lcd/render_lcd.c": "3650a642db5803ce6c82b4fc73d3b170df6bf99d7392e81559616548f8d664a5",
-    "boards/pico/src/components/epdiy/src/render.c": "9411782c9bcb08d362184885793a0c185a6694afcabd53810177d20bbc597e1d",
-    "boards/pico/src/components/read_pico/read_pico_board.c": "8411bf5b9d6699f0d98cc05cf5f865ca60e603474f07a2db19b97409829c8b6e",
-    "boards/pico/src/components/read_pico/read_pico_epd_timing.c": "8769d20993d8f2f00a7cff1f7b25f8fdceaf034c99549b07e03c9c3942f30d85",
-    "boards/pico/src/components/read_pico/read_pico_init.c": "2f615cd0e7fec612be5d1bfaca54bb9c55f92a091cc9eebd8734ce0f052d3f31",
-    "boards/pico/src/components/read_pico/read_pico_sd.c": "77fd3bc2a86abd1d45e9916424dd03c1482713e96d45b2992c96f16f3e701a58",
-    "boards/pico/src/main/display.c": "8336f24b791355c5a493037037ea9e088de44e95c1b23bd327c538a7de6ba81b",
-    "boards/pico/src/main/display_main_waveform.c": "9e68f063f433eae40fe3f1235cece23b8face9d87560b258ab04c09eec8c7832",
-    "boards/pico/src/main/display_reader_waveform.c": "ff215bbedbd9c8f96913195d3a566d3c508e17b8059863d5ba43c7631897862f",
-    "boards/pico/src/main/sleep.c": "1540e3433f75cb3968fed0032d1b712287d00dff69c6d53be2417ef3db566d46",
     "cmake/board.cmake": "8fe8b5033057ad1d032cda30be760e3aceba3acd13643c148e0b29f79cad87d0",
     "components/ble_page_turner/CMakeLists.txt": "af1aa7bf9c26423b26a4f49f6a4042233ee14559419df7f6afa7abb726a883f9",
     "components/ble_page_turner/include/ble_page_turner.h": "896d0b7f9dab4bf8c6b577aa1d03d695565660f96d795739012c74b4389a2efe",
@@ -142,22 +124,12 @@
     "components/metalio_hw/s31_sleep/s31_sleep.cc": "5d80bda50fccc7338e94658e4a3b4c121c19e239bba6fb68c4e600665d1deaa2",
     "components/metalio_hw/s31_sleep/s31_sleep.h": "48c977cde3f78d923264ddc9ca23c158d822483b01376a372e8aa0c795e57cce",
     "components/metalio_hw/s31_sleep/s31_sleep_sdk.cmake": "726eddbc82006509f2940f83254bf2a380bf9ca116dfccfc3861810eeb23fe5b",
-    "components/pwm_audio/CMakeLists.txt": "ef0c66e0291004532d81050a2a22c8ff5240a8ec72f8dcc9ab2d6179caea23ec",
-    "components/pwm_audio/LICENSE": "cbe56fbd68872aaf2c25caab9e3d3913cfb4c341627adc4ffbf5066006a2a628",
-    "components/pwm_audio/README.md": "b71d09bdd3277417cdea8767116c7d91f68f97d85c6c87de58fdec4ad665b0cd",
-    "components/pwm_audio/include/pwm_audio.h": "54a93f538ddaa2def16f5474f63e13e95b75e512a7b58e240af48791ebef86c1",
-    "components/pwm_audio/pwm_audio.c": "6078368352b75d71819bc1d8465b5c60905b49574451040a9c3b3f56de50dbef",
     "components/read_pico/CMakeLists.txt": "67dff59474925a8f579e2832eef336a013b9de8eaa6f3387bebc376f7f5da8a4",
     "components/read_pico/Kconfig": "a837d7237d4278abca4d8ec366f908845696bfabd2fb3420371428cf5becb894",
     "components/read_pico/LICENSE": "b7147589048285d212950e284ba51bf31facb620764a7ea773129c76560c7cc0",
     "components/read_pico/README.md": "071a11e3c468a4d11092ee29466d005ee146e8a0782db90e2f2d3cb9b80eeb93",
-    "components/read_pico/buzzer_1bit.c": "e3e9c85cc19c2909624b36553beeca155964fd12c43775e37035e6e263dcbf53",
-    "components/read_pico/buzzer_duty_map.c": "536a0c5c2c7b9e49acae2bb9176e65f679b976227ef02ebcfcf5077f2a2eadfd",
-    "components/read_pico/buzzer_score.c": "044ac9129e3ac3e00e17398133b18a56afb0a62573500dc0989cc962ca7c1541",
     "components/read_pico/idf_component.yml": "b92dd10e0157278e338d3da2416197a5a8d1edfc6c362d877420cfa987104958",
-    "components/read_pico/include/buzzer_1bit.h": "810de7116e86c43eec7da1d9bf0be2c5a093e21bfdf7406a324f54ad53d984c4",
     "components/read_pico/include/buzzer_duty_map.h": "cdac7fa9f480f6915d5713ee77763e5e31a0a8f0e6ec2f13e9814244fa2f1a69",
-    "components/read_pico/include/buzzer_score.h": "c6a481fa3018d445974118c35a5d62348c0dbcbffec6383471bf89f546235320",
     "components/read_pico/include/read_pico.h": "ada7311a774a7122437c73dc4485f9963624d0f0ccaf8ffa7897ac7724072187",
     "components/read_pico/include/read_pico_board.h": "d79f3224c42b84728dcdf629ca237aa467508782c21e7289c97af96fc8cc5879",
     "components/read_pico/include/read_pico_buzzer.h": "d3e5deea5ba69e041a338d3e9cc6da65d4a26a0dc238ea0f73d9bbac47281d2a",
@@ -167,9 +139,7 @@
     "components/read_pico/include/read_pico_sd.h": "25d9c9be14ef5628adff79badb020ba1aa6b32263954172c7f8811ffaa10d149",
     "components/read_pico/metalio_haptic.c": "2032289c6d6accea4c126f20344b1299409933df134300dbf5e182b9cda9cde4",
     "components/read_pico/read_pico_blockchain.ots": "1949539f749832fe25a70175fd49f24f7fe9a8afd7b965a91b2270a718a3e03d",
-    "components/read_pico/read_pico_buzzer.c": "23baa47e08092a86ebe66f2825707145a4fe457400a984f12aed11eb15870197",
     "components/read_pico/read_pico_crashlog.c": "0b583c9f65425321bc0d1fa1e87b6c4f92c01a28f7c9ef698b5409d2ee33e340",
-    "components/read_pico/read_pico_flash_hpm.c": "49284af0bb69ce55a0435c89e57d22d18be7fd23e25a06207090ed8cd6ed1420",
     "components/read_pico_pmu/CMakeLists.txt": "ebcb2bf85daf212e876a423d76dec619d3a7bc107aa1f0604f493421aa34fcc1",
     "components/read_pico_pmu/LICENSE": "b7147589048285d212950e284ba51bf31facb620764a7ea773129c76560c7cc0",
     "components/read_pico_pmu/README.md": "088104bb4a6cd0ac2a1045d0ada7382d104f06be4d4eac443d35e634cba6d969",
@@ -182,13 +152,10 @@
     "components/read_pico_pmu/docs/read_pico_pmu_datasheet_v1.0.8_en.pdf": "1ac03ec9924f38280cfc294ad57282d80b1db2118ea9158a6ae0e06adf497529",
     "components/read_pico_pmu/docs/read_pico_pmu_datasheet_v1.0.8_zh_cn.pdf": "0586fc829cb5be5931ca9a06dc0929a2167ec215ab5a9f95142ad841fec1f224",
     "components/read_pico_pmu/idf_component.yml": "42a966c83b0b674251dcd80e3d599faf28cd6633bf82dd73525fc5e226d34372",
-    "components/read_pico_pmu/include/pico_soc_filter.h": "7761e20205b0c9967e28a61d36cd8bf7b0ee815d0847a2d43d01ececb4022b5c",
     "components/read_pico_pmu/include/power_double_click.h": "1bfeff1c4f1eb62bcc5fc2df8196b1516e62b2ada3b549005e92cb15db39511c",
     "components/read_pico_pmu/include/read_pico_pmu.h": "6dc742518d4ad13edc6170463b2593f45746609dddbdf877a4a94cabab44405f",
     "components/read_pico_pmu/include/read_pico_pmu_protocol.h": "07c9b135d306a91cfd4028262f90fe703706f0782b1076c23c1d04e46c9db3d5",
     "components/read_pico_pmu/metalio_power_adapter.c": "3777c747da65399c7e5402f81b002aba31cffc17f3abe73e2f52b41e8aa8e6b1",
-    "components/read_pico_pmu/pico_soc_filter.c": "138252857687ffaf04ee948e2087bcdd5921b1f12763048f8105fcfd57c9c61f",
-    "components/read_pico_pmu/read_pico_pmu.c": "df23e166362dfa322aeba419c8fb9c20ec6562c13c40538588279439cb9e55d1",
     "components/sc7a20h/CMakeLists.txt": "cf4e57a432d9fc176fd5349ac61478d9c355a9c877287e64a262eaf559145b31",
     "components/sc7a20h/LICENSE": "b7147589048285d212950e284ba51bf31facb620764a7ea773129c76560c7cc0",
     "components/sc7a20h/README.md": "821d2476da448656a7cc965910a260e7ac50857676350aaec2fb73ddf0c2c487",
@@ -219,10 +186,6 @@
     "main/sleep.h": "9e2322807c1f0984247d0b4d4f68637ca8f8a1ce93f2a4b5a810164a2269aa9a"
   },
   "approved_overrides": {
-    "boards/pico/src/main/sleep.c": {
-      "sha256": "7c6b16ce79b251024c4170f690e52fba23ff96b0b67a9710fc83b1bfe3c1a411",
-      "user_decision": "用户2026-11-04要求Pico四种锁屏样式一起优化且保留保护：正常锁屏/浅睡解锁单次GC16、页面恢复后重启网络，拼贴提示只局部GC16；反馈/绘图/输出失败保留原清屏，缓存/PIN/深睡策略及波形不变。 / User2026-11-04 extends the Pico optimization to all four lock styles: one GC16 lock/light-wake restore, deferred network restart and local GC16 collage feedback; retain clearing on feedback/art/output failure and preserve cache/PIN/deep-sleep/waveform behavior. 用户2026-11-04报告透明书封透字并要求修复：仅透明书封入锁增加一次原GC16白目标后输出最终图，不改原表、供电与解锁逻辑，分配/显示失败沿用清屏兜底。 / User2026-11-04 authorizes one calibrated white GC16 target before transparent-cover art to address ghosting, retaining raw tables, power, unlock logic and allocation/display-failure recovery. 用户确认透明书封不再透字后要求其他类型一并修复：将一次GC16白目标+最终图扩展到Pico四种锁屏，异常清屏与解锁保护保持。 / After device confirmation, the user requests the same white-target plus final-image sequence for all four Pico lock styles, retaining failure recovery and unlock protection."
-    },
     "main/sleep.h": {
       "sha256": "0c067e19583e5ee75fd726f0bf773482b280346b795f88fd80ec2f175b99f4c5",
       "pull_request": 71,
@@ -241,12 +204,6 @@
     "components/read_pico_pmu/metalio_power_adapter.c": {
       "sha256": "4f6a59806ff47d3c59a9e23bde6a0fbdf539e69d4985a9173433a1f14bb59516",
       "reason": "User2026-11-09: align S31 displayed battery estimation/filter/wake reset to official v2.0.77; preserve charger control and Pico."
-    },
-    "boards/pico/src/main/display_reader_waveform.c": {
-      "sha256": "231de8d85f6b6d9d7575ec37f18021c1b9d058ecd584ddbb18cdbf5fb2f10d19",
-      "pull_request": 68,
-      "source_commit": "cd9f1a598a97a985bcda57dc47d49e118c4b1083",
-      "reason": "User2026-11-02 explicitly approved merging PR68 as authored; retain its Pico ripple erase/redrive phases and64-phase engine capacity."
     },
     "boards/metalio47/src/main/display_reader_waveform.c": {
       "sha256": "e256413af08373f8cd394fd09ef352880dc60966b658d3ba05201cefbe6b08cf",
@@ -277,12 +234,6 @@
       "sha256": "08233e4107469c665c5f2feec22ce78c3fdb6f51bc33b62c56caed977d95dccb",
       "reason": "User2026-11-02: S31 wake/font and keep-light policy, bounded Wi-Fi reception and read-only SD profile diagnostics; preserve native pins, power sequence, waveforms and SD fallback."
     },
-    "boards/pico/src/components/e0470_page_turn/e0470_page_turn.c": {
-      "sha256": "fcc91f574f59abcceab2f879f3d8992eb306c251a0933a974438e579ba39c114",
-      "pull_request": 68,
-      "source_commit": "cd9f1a598a97a985bcda57dc47d49e118c4b1083",
-      "reason": "User2026-11-02 explicitly approved merging PR68 as authored; retain its Pico ripple erase/redrive phases and64-phase engine capacity."
-    },
     "CMakeLists.txt": {
       "sha256": "a9b7d22f5ab7bc3117f86b54335bd8b7559a1370517691c2c3a66b8762ea0b08",
       "user_decision": "用户2026-11-03：S31残影/翻页优化定稿并直接提交合并（整页刷新恢复厂家完整48相，普通翻页对齐Pico的十二相擦白+四相重推黑）。/ User2026-11-03 finalizes the S31 ghosting/turn work and merges it directly (page refreshes use vendor full 48 phases; ordinary turns match Pico's twelve erase plus four black re-drive phases)."
@@ -299,12 +250,6 @@
     },
     "components/read_pico_pmu/include/read_pico_pmu.h": {
       "sha256": "49720e02dde22cad25256d465e2111ef28f773d523f656576cde80172f072018",
-      "user_decision": "用户2026-11-02授权直接合并PR72；记录合并后的Pico深睡唤醒PMU主机字节，使PR59固定基线仍有意义。 / User2026-11-02 authorized merging PR72 directly; record the merged Pico deep-wake PMU host bytes so the PR59 pin stays meaningful.",
-      "pull_request": 72,
-      "source_commit": "ba3d09e0ba95d06d04149465964428be3c81e998"
-    },
-    "components/read_pico_pmu/read_pico_pmu.c": {
-      "sha256": "72251f22dd8beff28e499f936897b82be98c13f459fc54842570a3e22682d5bb",
       "user_decision": "用户2026-11-02授权直接合并PR72；记录合并后的Pico深睡唤醒PMU主机字节，使PR59固定基线仍有意义。 / User2026-11-02 authorized merging PR72 directly; record the merged Pico deep-wake PMU host bytes so the PR59 pin stays meaningful.",
       "pull_request": 72,
       "source_commit": "ba3d09e0ba95d06d04149465964428be3c81e998"
@@ -329,19 +274,9 @@
       "sha256": "d752e1db7932db3bab8abb08c7e2753efe7d8f2f189919a5a5925f9e3412279c",
       "reason": "User2026-11-05 explicitly requests Pico reader idle rail retention; expose only the Pico lifecycle setter, preserving S31, waveform bytes, voltages and existing power-off sequencing."
     },
-    "boards/pico/src/main/display.c": {
-      "sha256": "0432fb775f549c1091da119bfc07941fc409c46612516fa5d5dcc36fd7c3ab39",
-      "reason": "User2026-11-05 enables Pico reader idle HV retention with neutral pixel/VCOM release, exit/lock revocation and retained fault timeout; preserve original waveforms, voltages, timing and S31.",
-      "pico_settings_motion_authorization": "User2026-11-07 reports excessive dark ghosts during Pico settings motion; add only a scoped12-phase FOLLOW-derived profile (retain black7,white12/equal-white2) and recognize its FAST identity. Full-pixel list motion only; preserve existing Moku profiles, scan timing, reader/idle, power and S31. Local-only delivery."
-    },
     "components/e0470_epaper_waveform/CMakeLists.txt": {
       "sha256": "595e9561dd93e7be298d3cd8372ae0e08024512bafd636513cc842fb105e5d1a",
       "settings_short_motion_authorization": "User2026-11-07 requests an opt-in S31 settings-only14-phase motion accessor, keeping global DU14 off and existing reader/idle/raw profiles unchanged; local delivery only."
-    },
-    "boards/pico/src/main/display_main_waveform.c": {
-      "sha256": "9556d91253fbbd3254eaf51c8669f4c25ea9e08069c101fc6985daa65536a458",
-      "pico_settings_motion_authorization": "User2026-11-07 reports excessive dark ghosts during Pico settings motion; add only a scoped12-phase FOLLOW-derived profile (retain black7,white12/equal-white2) and recognize its FAST identity. Full-pixel list motion only; preserve existing Moku profiles, scan timing, reader/idle, power and S31. Local-only delivery.",
-      "pico_settings_steady_motion_authorization": "User2026-11-07 reports white flashing during held Pico settings drags in8853. Remove only scoped equal-white maintenance and use changed-only DU12; retain changed-white12/black7, existing FAST timing and800ms idle53 recovery. Existing Moku tables,reader,power and S31 unchanged; local delivery only."
     },
     "main/display_main_waveform.h": {
       "sha256": "559702bbde33d5e93734c0e01a7cb5f5c4d6822dd4872c2017aa0da0a2afa197",

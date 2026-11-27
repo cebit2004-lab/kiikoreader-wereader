@@ -80,10 +80,12 @@ bool read_pico_transfer_pause_for_sleep(void);
 void read_pico_transfer_resume_after_sleep(void);
 /// 跨任务复制一致状态快照。/ Copy a consistent snapshot across tasks.
 void read_pico_transfer_get_status(read_pico_transfer_status_t *out);
-#if KIIKO_BOARD_METALIO47
 /// 包括临时对时/扫描及BLE的射频占用快照，供屏保留余量。/ Include temporary sync/scans and BLE activity when choosing display margins.
 bool read_pico_transfer_radio_busy(void);
-#endif
+/// 当前会话编号：每次获准启动加一，睡眠恢复不变。启动者记下它，收回前核对，免得停掉别人后来开的会话。
+/// Current session number: incremented on every admitted start, unchanged by a resume after sleep. A
+/// starter notes it and checks it before stopping, so it never stops a session someone else opened later.
+uint32_t read_pico_transfer_session_id(void);
 /// 阅读上报期间保持接收唤醒；成对调用，恢复连接原有的省电策略。
 /// Keep RX awake while a reading session reports; call in pairs to restore the link's power policy.
 /// 仅供阅读会话的单一线程成对使用，不做嵌套引用计数。/ Single owner per session; not re-entrant.

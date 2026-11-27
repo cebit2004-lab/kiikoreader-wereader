@@ -84,11 +84,7 @@ static void rc_draw_settings(uint8_t*fb){
     }else{
         rc_link(fb,(EpdRect){36,746,612,110},"触摸操作","全屏示意 · 点按 · 长按 · 滑动");
         rc_link(fb,(EpdRect){36,878,612,110},"点击翻页区域",app_settings_reader_vertical_turn()?"上下翻页":"左右翻页");
-#if KIIKO_BOARD_METALIO47
         rc_link(fb,(EpdRect){36,1010,612,110},"按键控制","左键 · 圆圈键 · 右键");
-#else
-        rc_link(fb,(EpdRect){36,1010,612,110},"按键控制","左键 · 中键 · 右键");
-#endif
     }
     rc_done(fb,"完成");ui_text_set_system_scale(false);
 }
@@ -178,14 +174,10 @@ static void rc_draw_touch_more(uint8_t*fb){
 }
 static EpdRect rc_light_slider_rect(void){return(EpdRect){36,950,612,76};}
 static void rc_draw_light(uint8_t*fb){
-#if KIIKO_BOARD_METALIO47
     ui_text_set_system_scale(true);draw_sheet(fb,790,s_rc_light_warm?"色温调节":"亮度调节");draw_sheet_back(fb,790);
     unsigned level=metalio_frontlight_position(s_rc_light_warm);char value[16];snprintf(value,sizeof(value),"%u%%",level*100/METALIO_FRONTLIGHT_RANGE);
     draw_pill_slider(fb,rc_light_slider_rect(),s_rc_light_warm?"冷":"暗",s_rc_light_warm?"暖":"亮",value,level,METALIO_FRONTLIGHT_RANGE+1,21,21);
     rc_text(fb,(EpdRect){42,1048,590,44},22,"拖动调节，松手保存",true,false);rc_done(fb,"返回阅读");ui_text_set_system_scale(false);
-#else
-    (void)fb;
-#endif
 }
 static bool rc_draw_current(uint8_t*fb){
     switch(s_reader_panel){

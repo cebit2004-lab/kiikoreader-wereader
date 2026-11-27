@@ -17,12 +17,16 @@
 extern "C" {
 #endif
 
-/// 需要时连上已保存的 WiFi（最多约 30 秒）；失败写 err。cancel 非空且变为真时立即放弃。
-/// Join the saved WiFi if needed (up to ~30 s); writes err on failure. Gives up at once when a non-NULL cancel turns true.
+/// 需要时连上已保存的 WiFi（最多约 30 秒）；失败写 err。cancel 非空且变为真时立即放弃。只认 STA，热点传书不抢。
+/// Join the saved WiFi if needed (up to ~30 s); writes err on failure. Gives up at once when a non-NULL cancel
+/// turns true. Only an STA counts; a transfer hotspot is never taken over.
 bool media_net_acquire(char *err, size_t err_size, const volatile bool *cancel);
-/// 断开本模块启动的 WiFi（用于先占 I2S 再重连）。/ Drop WiFi this module started (to claim I2S first, then reconnect).
+/// 空闲时断开 STA（用于先占 I2S 再重连）。断的若是别人开的 WiFi，重连后收回时保持开着。
+/// Drop the STA when idle (to claim I2S first, then reconnect). If it was someone else's WiFi, the rejoined
+/// connection stays up at release.
 void media_net_drop(void);
-/// 音乐与 AI 都不再需要时断开本模块启动的 WiFi。/ Drop WiFi this module started once neither music nor AI needs it.
+/// 音乐与 AI 都不再需要时断开本模块启动、且仍是当前会话的 WiFi。
+/// Drop WiFi this module started, if it is still the current session, once neither music nor AI needs it.
 void media_net_release_if_unused(void);
 
 /// 向网关的丢弃端口发 30 个 1 字节 UDP 包，推通刚连上 WiFi 时卡住的上行（见 media_net.c）。sent/failed 可为 NULL。

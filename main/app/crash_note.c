@@ -20,7 +20,13 @@
 #include "esp_log.h"
 #include "esp_memory_utils.h"
 #include "esp_private/panic_internal.h"
+#include "sdkconfig.h"
+// 帧结构按架构不同：RISC-V（S31）才抓返回地址与栈上代码地址，Xtensa（Pico 的 S3）只记基本现场。
+// The frame layout is per architecture: only RISC-V (S31) captures the return address and stack code
+// addresses; Xtensa (Pico's S3) records the basic scene only.
+#if CONFIG_IDF_TARGET_ARCH_RISCV
 #include "riscv/rvruntime-frames.h"
+#endif
 
 static const char *TAG = "crash";
 
@@ -68,6 +74,7 @@ void __wrap_esp_panic_handler(panic_info_t *info) {
         }
         s_note.ra = 0;
         for (size_t i = 0; i < sizeof(s_note.stack_pc) / sizeof(s_note.stack_pc[0]); ++i) s_note.stack_pc[i] = 0;
+#if CONFIG_IDF_TARGET_ARCH_RISCV
         const RvExcFrame *frame = (const RvExcFrame *)info->frame;
         if (frame != NULL) {
             s_note.ra = (uint32_t)frame->ra;
@@ -84,6 +91,7 @@ void __wrap_esp_panic_handler(panic_info_t *info) {
                 }
             }
         }
+#endif
         // magic 最后写：它落地才算这条记录完整。
         // The magic goes last: only once it lands is the record complete.
         s_note.magic = CRASH_NOTE_MAGIC;

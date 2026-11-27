@@ -127,6 +127,25 @@ static const size_t k_play_ring_sizes[] = {2 * 1024 * 1024, 1024 * 1024, 384 * 1
 // reports which step it is stuck in.
 #define CTL_SLOW_MS 1500
 #define CTL_STUCK_MS 5000
+// 从开始连接到会话就绪（session.updated）的上限：握手后服务端不回 session.created、配置被拒又不断开时，
+// 不能一直停在「正在连接」占着 WiFi 和麦克风。比连接超时（NET_TIMEOUT_MS）长。
+// Longest time from starting a connection to a ready session (session.updated): if the server never
+// sends session.created after the handshake, or rejects the configuration without disconnecting, the
+// chat must not sit in "connecting" holding WiFi and the mic. Longer than NET_TIMEOUT_MS.
+#define READY_TIMEOUT_MS 25000
+// 调试开关，默认关。/ Debug switches, off by default.
+// AI_NET_DIAG：断线/连不上时探测网关与公共 DNS（阻塞控制任务约 5 秒），并记录每个收发包。
+// AI_NET_DIAG: on a drop or failed connect, probe the gateway and public DNS servers (blocks the
+// control task about 5 s), and log every packet sent and received.
+#ifndef AI_NET_DIAG
+#define AI_NET_DIAG 0
+#endif
+// AI_LOG_TRANSCRIPTS：把你说的话和 AI 的回答原文写进日志（含 SD 卡上的 ai.log）。默认只记字节数。
+// AI_LOG_TRANSCRIPTS: write your words and the AI's reply verbatim to the log (including ai.log on the
+// SD card). By default only their byte counts are logged.
+#ifndef AI_LOG_TRANSCRIPTS
+#define AI_LOG_TRANSCRIPTS 0
+#endif
 #define INSTRUCTIONS                                                                              \
     "你是墨水屏阅读器上的语音助手。用简短自然的中文口语回答，先说结论，一般不超过四句；"             \
     "不念标题、列表和符号。用户常在读书：可以解释词语、成语、典故、人物和历史背景，翻译外文，"       \
@@ -169,7 +188,11 @@ static int64_t s_release_pending_us;  // 开始等的时刻 / when the wait bega
 static _Atomic bool s_page_open;     // AI 页开着 / the AI page is open
 static _Atomic bool s_warm;          // 音频与 WiFi 由预热持有（不在对话中）/ audio and WiFi held by the warm-up (no chat)
 static int64_t s_warm_until_us;      // 到点收回 / release when due
-static bool s_audio_open;            // 本模块打开的 I2S 还开着 / the I2S this module opened is still open
+static _Atomic bool s_audio_open;    // 本模块打开的 I2S 还开着 / the I2S this module opened is still open
+// 收尾进行中（结束对话或收回预热，含停 WiFi、写日志）、预热进行中：ai_fully_released 据此判断。
+// Teardown in progress (ending a chat or releasing the warm-up, WiFi stop and log write included), and
+// warm-up in progress: ai_fully_released checks these.
+static _Atomic bool s_tearing_down, s_warming;
 // 「正在连接」时点了取消、开始命令还排在队里：开始命令到了就作废。
 // Cancel tapped while connecting with the start command still queued: drop it when it arrives.
 static _Atomic bool s_start_cancelled;
@@ -341,7 +364,14 @@ static void set_error(const char *msg) {
     unlock();
 }
 static void touch(void) { atomic_store(&s_last_activity_us, esp_timer_get_time()); }
-static void post(cmd_t cmd) { if (s_cmds) xQueueSend(s_cmds, &cmd, 0); }
+// 只由 WebSocket 回调调用。丢了「配置」或「断开」会话就卡在连接中，所以队列满时稍等一下。
+// Called from WebSocket callbacks only. Losing "configure" or "ended" would leave the chat stuck
+// connecting, so wait briefly when the queue is full.
+#define POST_WAIT_MS 200
+static void post(cmd_t cmd) {
+    if (s_cmds && xQueueSend(s_cmds, &cmd, pdMS_TO_TICKS(POST_WAIT_MS)) != pdTRUE)
+        ai_log("event command %d dropped: queue full", (int)cmd);
+}
 
 // ---------------------------------------------------------------- sending
 
@@ -412,11 +442,6 @@ static void send_session_update(void) {
 }
 
 // ---------------------------------------------------------------- receiving
-
-static void clear_playback(void) {
-    if (!s_play) return;
-    for (int i = 0; i < 20 && xStreamBufferReset(s_play) != pdPASS; ++i) vTaskDelay(pdMS_TO_TICKS(10));
-}
 
 static void resampler_init(void) {
     const float fc = (float)RS_CUTOFF_HZ / REPLY_RATE_DEFAULT;  // 相对输入采样率 / relative to the input rate
@@ -577,7 +602,11 @@ static void handle_event(const char *text) {
     } else if (!strcmp(type, "conversation.item.input_audio_transcription.completed")) {
         const char *said = cJSON_GetStringValue(cJSON_GetObjectItem(root, "transcript"));
         if (said) {
+#if AI_LOG_TRANSCRIPTS
             ai_log("USER: %.200s", said);
+#else
+            ai_log("user transcript: %u bytes", (unsigned)strlen(said));
+#endif
             lock();
             snprintf(s_st.user, sizeof(s_st.user), "%s", said);
             unlock();
@@ -593,6 +622,8 @@ static void handle_event(const char *text) {
         s_reply_samples = 0;
         lock();
         s_st.reply[0] = 0;
+        // 上一段的错误（如取消失败）不再挡住新回答。/ An earlier error (a failed cancel, say) no longer hides the new reply.
+        s_st.error[0] = 0;
         if (s_st.state != AI_SPEAKING) s_st.state = AI_THINKING;
         unlock();
     } else if (!strcmp(type, "response.audio_transcript.delta") || !strcmp(type, "response.text.delta")) {
@@ -602,11 +633,16 @@ static void handle_event(const char *text) {
             lock();
             const size_t used = strlen(s_st.reply);
             snprintf(s_st.reply + used, sizeof(s_st.reply) - used, "%s", delta);
+            s_st.error[0] = 0;  // 有新回答文字就显示它 / new reply text takes the place of any error
             unlock();
         }
     } else if (!strcmp(type, "response.audio_transcript.done")) {
         const char *reply = cJSON_GetStringValue(cJSON_GetObjectItem(root, "transcript"));
+#if AI_LOG_TRANSCRIPTS
         ai_log("AI: %.200s", reply ? reply : "");
+#else
+        ai_log("reply transcript: %u bytes", reply ? (unsigned)strlen(reply) : 0u);
+#endif
     } else if (!strcmp(type, "response.done")) {
         touch();
         atomic_store(&s_responding, false);
@@ -1497,6 +1533,16 @@ static void lw_log(const char *why) { (void)why; }
 #include "esp_netif_net_stack.h"
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"
+static struct netif *s_pkt_netif;
+static netif_input_fn s_pkt_input;
+// 最近一次收到 TCP 包的时间：推上行只在连接后还没收到过回应时做（见 uplink_nudge）。这一项不受
+// AI_NET_DIAG 控制：推上行要靠它判断何时停手，只多看每个收包的几个字节。
+// When a TCP packet last arrived: the uplink is pushed only while a connect has had no reply yet. This
+// part is not under AI_NET_DIAG: the nudge relies on it to know when to stop, and it only looks at a
+// few bytes of each received packet.
+static volatile int64_t s_tcp_in_us;
+
+#if AI_NET_DIAG
 typedef struct {
     int64_t us;
     uint32_t peer, seq, ack;
@@ -1508,11 +1554,6 @@ typedef struct {
 static EXT_RAM_BSS_ATTR pkt_t s_pkts[PKT_RING];
 static unsigned s_pkt_head;
 static portMUX_TYPE s_pkt_mux = portMUX_INITIALIZER_UNLOCKED;
-static struct netif *s_pkt_netif;
-static netif_input_fn s_pkt_input;
-// 最近一次收到 TCP 包的时间：推上行只在连接后还没收到过回应时做（见 uplink_nudge）。
-// When a TCP packet last arrived: the uplink is pushed only while a connect has had no reply yet.
-static volatile int64_t s_tcp_in_us;
 static netif_linkoutput_fn s_pkt_output;
 static int64_t s_pkt_t0;
 
@@ -1548,15 +1589,27 @@ static void pkt_note(struct pbuf *p, bool out, err_t err) {
     taskEXIT_CRITICAL(&s_pkt_mux);
 }
 
-static err_t pkt_input(struct pbuf *p, struct netif *inp) {
-    pkt_note(p, false, ERR_OK);
-    return s_pkt_input(p, inp);
-}
-
 static err_t pkt_output(struct netif *netif, struct pbuf *p) {
     const err_t err = s_pkt_output(netif, p);
     pkt_note(p, true, err);
     return err;
+}
+#else
+// 只记收到 TCP 包的时刻。/ Note only when a TCP packet arrives.
+static void pkt_note_tcp_in(const struct pbuf *p) {
+    if (!p || p->len < 14 + 20) return;
+    const uint8_t *e = p->payload;
+    if (e[12] == 0x08 && e[13] == 0x00 && e[14 + 9] == 6) s_tcp_in_us = esp_timer_get_time();
+}
+#endif
+
+static err_t pkt_input(struct pbuf *p, struct netif *inp) {
+#if AI_NET_DIAG
+    pkt_note(p, false, ERR_OK);
+#else
+    pkt_note_tcp_in(p);
+#endif
+    return s_pkt_input(p, inp);
 }
 
 // WiFi 起来后调用：网口每次启动 WiFi 都是新建的，所以每次都要重新包。
@@ -1567,15 +1620,18 @@ static void pkt_trace_attach(void) {
     if (!n || n->input == pkt_input) return;
     s_pkt_netif = n;
     s_pkt_input = n->input;
+#if AI_NET_DIAG
     s_pkt_output = n->linkoutput;
     n->linkoutput = pkt_output;
-    n->input = pkt_input;
     s_pkt_t0 = esp_timer_get_time();
     taskENTER_CRITICAL(&s_pkt_mux);
     s_pkt_head = 0;
     taskEXIT_CRITICAL(&s_pkt_mux);
+#endif
+    n->input = pkt_input;
 }
 
+#if AI_NET_DIAG
 static void pkt_dump(const char *why) {
     if (!s_pkt_netif) return;
     taskENTER_CRITICAL(&s_pkt_mux);
@@ -1760,6 +1816,10 @@ static void net_probe(const char *why) {
     lw_log("since connect start, probes included");
     esp_wifi_statis_dump(WIFI_STATIS_BUFFER | WIFI_STATIS_RXTX | WIFI_STATIS_DIAG);
 }
+#else
+static void pkt_dump(const char *why) { (void)why; }
+static void net_probe(const char *why) { lw_log(why); }
+#endif  // AI_NET_DIAG
 
 // 诊断：WebSocket 与控制任务此刻的状态（运行/就绪/阻塞）、当前优先级（含继承来的）和栈余量。只读
 // 系统任务表，不碰可能已删除的任务句柄。
@@ -1897,8 +1957,13 @@ static void ws_close(void) {
     atomic_fetch_add(&s_reapers, 1);
     if (xTaskCreatePinnedToCoreWithCaps(reap_task, "ai_reap", 4 * 1024, ws, 4, NULL, tskNO_AFFINITY,
                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        // 建不了收尾任务就漏掉这个客户端：在这里销毁会无限期等它的任务退出，控制任务就卡住了。套接字已
+        // 关，代号已清零，它的事件一律忽略。
+        // No helper task: leak the client. Destroying it here waits forever for its task to exit and
+        // would hang the control task. The socket is already shut and the generation cleared, so its
+        // events are all ignored.
         atomic_fetch_sub(&s_reapers, 1);
-        esp_websocket_client_destroy(ws);  // 建不了收尾任务就在这里销毁 / no helper task: destroy here
+        ai_log("ws close: no memory for the reap task; leaking the old client");
     }
     while (atomic_load(&s_reapers) > 0 && esp_timer_get_time() - t0 < (int64_t)REAP_WAIT_MS * 1000)
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -1930,6 +1995,8 @@ static void free_session_buffers(void) {
 }
 
 static void session_end(const char *err) {
+    // 到 WiFi 收回、日志写完为止都算收尾（见 ai_fully_released）。/ Teardown lasts until WiFi is released and the log written (see ai_fully_released).
+    atomic_store(&s_tearing_down, true);
     atomic_store(&s_streaming, false);
     atomic_store(&s_session, false);
     s_retry_at_us = 0;
@@ -1953,9 +2020,17 @@ static void session_end(const char *err) {
     const bool keep = atomic_load(&s_page_open) && s_audio_open && workers_done;
     if (keep) {
         metalio_audio_set_pa(false);
-    } else {
-        metalio_audio_close();
+    } else if (workers_done) {
+        // 只关自己开的：没配密钥等早退时音乐可能还开着 I2S。/ Close only what this module opened: on an early
+        // exit (no API key, say) music may still have I2S open.
+        if (s_audio_open) metalio_audio_close();
         s_audio_open = false;
+    } else {
+        // 工作任务还在读写 I2S：这时关会让它们用已释放的通道。留着，等它们退出后由控制任务再关（见 ctl_task）。
+        // Workers are still in I2S calls: closing now would leave them on a freed channel. Keep it open;
+        // the control task closes it once they exit (see ctl_task).
+        metalio_audio_set_pa(false);
+        ai_log("i2s kept open until the workers exit");
     }
     // 任务没退出就不释放它们还在用的缓冲：宁可漏一次内存，也不能写坏堆。
     // Buffers still in use by a live task are kept: leaking once beats corrupting the heap.
@@ -1990,6 +2065,7 @@ static void session_end(const char *err) {
         release_network();
     }
     log_flush();
+    atomic_store(&s_tearing_down, false);
 }
 
 // 先开 I2S（麦克风+喇叭）再连 WiFi：I2S DMA 只能用内部 RAM，实测 WiFi 连上后最大空块只剩约 5.8 KB，
@@ -2012,8 +2088,12 @@ static bool open_audio(void) {
 
 static void warm_release(const char *why) {
     if (!atomic_load(&s_warm) || atomic_load(&s_session)) return;
+    atomic_store(&s_tearing_down, true);
     atomic_store(&s_warm, false);
-    metalio_audio_close();
+    // 音乐已经在用这个 I2S（开着就直接沿用）：交给它，不关。/ Music is already using this I2S (it reuses an
+    // open one): hand it over rather than close it.
+    if (music_active()) ai_log("warm: i2s left to music");
+    else metalio_audio_close();
     s_audio_open = false;
     ai_log("warm: released (%s)", why);
     if (atomic_load(&s_reapers) > 0) {
@@ -2023,6 +2103,7 @@ static void warm_release(const char *why) {
         release_network();
     }
     log_flush();
+    atomic_store(&s_tearing_down, false);
 }
 
 // 预热时打通上行（见 media_net_ensure_uplink），让刚连上 WiFi 时的卡顿在用户看页面时过去。
@@ -2036,10 +2117,19 @@ static void open_uplink(const char *why, bool (*keep)(void)) {
     else if (ms < 0) ai_log("%s: uplink not confirmed", why);
 }
 
+static void warm_up_run(void);
 static void warm_up(void) {
     if (!atomic_load(&s_page_open) || atomic_load(&s_session) || atomic_load(&s_warm)) return;
     if (!RT_API_KEY[0] || music_active()) return;
     if (atomic_load(&s_workers) > 0 || atomic_load(&s_handlers) > 0) return;  // 上次还在收尾 / last chat still winding down
+    if (atomic_load(&s_audio_open)) return;  // 上次的 I2S 还没关（工作任务没退出）/ the last chat's I2S is not closed yet (workers alive)
+    // 预热进行中也算占着（见 ai_fully_released）。/ A warm-up in progress counts as holding (see ai_fully_released).
+    atomic_store(&s_warming, true);
+    warm_up_run();
+    atomic_store(&s_warming, false);
+}
+
+static void warm_up_run(void) {
     s_cancel = false;
     atomic_store(&s_release_pending, false);
     mem_session_begin();
@@ -2073,7 +2163,12 @@ static void warm_up(void) {
 static void ws_lost(void) {
     atomic_store(&s_streaming, false);
     ws_close();
-    clear_playback();
+    // 断掉的回答余下的语音由播放任务自己倒掉（流缓冲只能一读一写，不能从这里清空）；新回答开始时
+    // （response.created）恢复接收。
+    // The playback task pours away the rest of the lost reply itself (a stream buffer allows one reader
+    // and one writer, so it must not be reset from here); receiving resumes with the next reply
+    // (response.created).
+    atomic_store(&s_discard, true);
     atomic_store(&s_responding, false);
     const char *cause = s_last_cause[0] ? s_last_cause : "连接已断开";
     if (!s_auth_failed) {
@@ -2214,11 +2309,15 @@ static void session_start(void) {
 // tell the server to cancel as best effort, waiting CANCEL_TIMEOUT_MS at most if it cannot be sent.
 static void interrupt_reply(void) {
     atomic_store(&s_discard, true);  // 接收端丢弃、播放任务倒空缓冲 / receive drops, playback drains the buffer
-    atomic_store(&s_responding, false);
+    const bool was_responding = atomic_exchange(&s_responding, false);
     metalio_audio_set_pa(false);
     touch();
     set_state(AI_LISTENING);
-    ai_log("interrupted by user (receive at %s)", s_ws_where);
+    ai_log("interrupted by user (receive at %s, reply %s)", s_ws_where, was_responding ? "in progress" : "fully received");
+    // 回答已收完（只是本地还在播）时服务端没有可取消的回答，发了只会换来一条错误。
+    // With the reply fully received (only still playing here) the server has nothing to cancel; sending
+    // would only bring back an error.
+    if (!was_responding) return;
     ctl_step("interrupt: send response.cancel");
     send_type("response.cancel", CANCEL_TIMEOUT_MS);
 }
@@ -2282,6 +2381,23 @@ static void ctl_task(void *arg) {
         check_rx_stall();
         s_ctl_step = NULL;
         if (atomic_load(&s_session)) mem_sample();
+        // 开始连接后迟迟不就绪（握手后服务端不配置会话、配置被拒又不断开等）：按断线处理，重连用完就结束，
+        // 不会一直停在「正在连接」。
+        // Not ready long after the connection started (no session configured after the handshake, a
+        // rejected configuration without a disconnect, and so on): treat it as a drop, ending the chat
+        // once the retries are used up, so it never sits in "connecting" for good.
+        if (atomic_load(&s_session) && s_ws && !atomic_load(&s_streaming) &&
+            esp_timer_get_time() - s_connect_us > (int64_t)READY_TIMEOUT_MS * 1000) {
+            const bool connected = atomic_load(&s_ws_connected);
+            ai_log("not ready %d s after connect start (%s)", READY_TIMEOUT_MS / 1000,
+                   connected ? "handshake done, session not configured" : "handshake not done");
+            if (!s_last_cause[0])
+                snprintf(s_last_cause, sizeof(s_last_cause), connected ? "AI 服务没有就绪（%d 秒）" : "连接 AI 服务超时（%d 秒）",
+                         READY_TIMEOUT_MS / 1000);
+            ctl_step("ready timeout");
+            ws_lost();
+            s_ctl_step = NULL;
+        }
         // 连接还没完成、服务器也还没回过包：每秒推一次上行（见 uplink_nudge）。已经有回应就不推，2026-11-26
         // 实测在 TLS 握手中途推会占满发送缓冲，ACK 发不出去。
         // Not connected and no reply from the server yet: push the uplink each second (see uplink_nudge).
@@ -2320,7 +2436,19 @@ static void ctl_task(void *arg) {
         }
         if (atomic_load(&s_warm) && !atomic_load(&s_session) && esp_timer_get_time() >= s_warm_until_us)
             warm_release("idle for 90 s");
-        if (!atomic_load(&s_session) && !atomic_load(&s_release_pending) && !atomic_load(&s_warm)) {
+        // 对话结束时工作任务没退出、I2S 因此留着：它们一退出就关。/ The chat ended with workers still alive, so
+        // I2S was kept: close it as soon as they exit.
+        if (atomic_load(&s_audio_open) && !atomic_load(&s_session) && !atomic_load(&s_warm) &&
+            atomic_load(&s_workers) == 0 && atomic_load(&s_handlers) == 0) {
+            ctl_step("deferred i2s close");
+            if (music_active()) ai_log("deferred i2s close: left to music");
+            else metalio_audio_close();
+            atomic_store(&s_audio_open, false);
+            ai_log("workers exited; i2s released");
+            s_ctl_step = NULL;
+        }
+        if (!atomic_load(&s_session) && !atomic_load(&s_release_pending) && !atomic_load(&s_warm) &&
+            !atomic_load(&s_audio_open)) {
             taskENTER_CRITICAL(&s_mux);
             const bool done = uxQueueMessagesWaiting(s_cmds) == 0;
             if (done) s_ctl = NULL;
@@ -2447,3 +2575,8 @@ bool ai_audio_busy(void) {
 bool ai_active(void) { return atomic_load(&s_session) || s_st.state != AI_IDLE; }
 
 bool ai_net_busy(void) { return atomic_load(&s_reapers) > 0; }
+
+bool ai_fully_released(void) {
+    return !ai_active() && !atomic_load(&s_tearing_down) && !atomic_load(&s_warming) && !atomic_load(&s_warm) &&
+           !atomic_load(&s_release_pending) && !atomic_load(&s_audio_open) && !ai_net_busy();
+}

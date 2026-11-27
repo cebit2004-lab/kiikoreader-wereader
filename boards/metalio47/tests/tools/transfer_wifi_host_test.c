@@ -53,11 +53,7 @@ static unsigned key_index(const char *key){
     assert(!strcmp(key,"networks_v1"));return 1;
 }
 static esp_err_t nvs_open(const char *name,int mode,nvs_handle_t *handle){
-#if KIIKO_BOARD_METALIO47
     assert(!strcmp(name,"metalio_wifi"));
-#else
-    assert(!strcmp(name,"rp_wifi"));
-#endif
     (void)mode;if(fail_open)return ESP_FAIL;
     assert(!handles);++handles;*handle=1;memcpy(staged,committed,sizeof(staged));return ESP_OK;
 }

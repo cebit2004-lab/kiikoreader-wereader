@@ -3,7 +3,7 @@
 
 # 源码目录索引
 
-本仓库以标准 ESP-IDF 项目结构组织，默认开发目标为 kiikoreader Metalio S31（ESP32-S31，固件基线 0.3.3-rc113）。共享代码仍保留 Pico 板级支持；构建目标由 `--board` 明确选择。
+本仓库以标准 ESP-IDF 项目结构组织，默认开发目标为 kiikoreader Metalio S31（ESP32-S31，固件基线 0.3.3-rc113）。原 Pico 板级支持已移除。
 
 ```text
 .

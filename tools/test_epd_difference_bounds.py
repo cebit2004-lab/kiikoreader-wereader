@@ -117,6 +117,6 @@ if __name__=='__main__':
     args=parser.parse_args()
     with tempfile.TemporaryDirectory() as temp:
         directory=Path(temp);(directory/'esp_attr.h').write_text('#define IRAM_ATTR\n')
-        for board in ('pico','metalio47'):
+        for board in ('metalio47',):
             run(board,directory)
             if args.check_regression:run(board,directory,True)

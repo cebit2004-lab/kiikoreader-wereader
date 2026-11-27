@@ -10,9 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 # 英式词典音标常用字符，外加省略号。/ Characters used by British dictionary phonetics, plus the ellipsis.
 IPA = 'ɑæɐəɚɛɜɝɪɒɔʊʌʃʒθðŋɡɹɾʔˈˌːˑɫʤʧɘɵɨʉ…'
-# main/assets 那份是像素对照基准（pico_builtin_font_host_test.py），不改。
-# The main/assets copy is the pixel reference for pico_builtin_font_host_test.py and stays as is.
-TARGETS = ['boards/metalio47/src/main/assets/builtin.ttf', 'boards/pico/src/main/assets/builtin.ttf']
+TARGETS = ['boards/metalio47/src/main/assets/builtin.ttf']
 
 
 def add(dst_path: Path, src):

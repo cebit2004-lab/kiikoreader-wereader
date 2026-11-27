@@ -302,7 +302,6 @@ int main(void) {
     tap(&ctx, (EpdRect){540, UI_NAV_TOP + 16, 20, 20});
     assert(test_stop_count == stops_before && test_nav_index == -1);
     test_busy = false;
-#if KIIKO_BOARD_METALIO47
     // Small live progress is bounded to the two-second poll, with failed scans retried.
     s_status.state=READ_PICO_TRANSFER_READY;test_status.state=READ_PICO_TRANSFER_UPLOADING;
     strcpy(test_status.cur_name,"font-one.ttf");
@@ -335,7 +334,6 @@ int main(void) {
     test_status.last_error=ESP_OK;
     test_status.state=READ_PICO_TRANSFER_READY;ctx.now_ms+=3000;
     assert(on_tick(&ctx)!=APP_REDRAW_NONE);
-#endif
     test_status.changed_count = 1;
     s_poll_ms=0;ctx.now_ms = 3000;
     assert(on_tick(&ctx) == APP_REDRAW_AREA);

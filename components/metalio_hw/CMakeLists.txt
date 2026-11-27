@@ -1,8 +1,4 @@
 include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/board.cmake")
-if(NOT KIIKO_BOARD_METALIO47)
-    idf_component_register()
-    return()
-endif()
 include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/board.cmake")
 kiiko_board_sources(kiiko_selected_sources "${CMAKE_CURRENT_LIST_DIR}" "metalio_hw.c" "metalio_charger.c" "metalio_usb.c" "metalio_ai_key.c")
 idf_component_register(SRCS ${kiiko_selected_sources} INCLUDE_DIRS "include"

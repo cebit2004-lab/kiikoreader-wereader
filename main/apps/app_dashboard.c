@@ -1,11 +1,9 @@
 #if defined(KIIKO_LOCAL_LATENCY) || KIIKO_BOARD_METALIO47
-#if KIIKO_BOARD_METALIO47
 #include "esp_log.h"
 #ifdef ESP_PLATFORM
 #include "ui_locale_format.h"
 #endif
 #include "metalio_hw.h"
-#endif
 #include "esp_timer.h"
 #endif
 #ifdef KIIKO_LOCAL_LATENCY
@@ -50,10 +48,7 @@
 #include "boot_state.h"
 #include "app_registry.h"
 #include "book_cover.h"
-#if KIIKO_BOARD_METALIO47
 #include "metalio_cover_cache.h"
-#else
-#endif
 #include "book_cover_jobs.h"
 #include "ui_image_dither.h"
 #include "book_epub.h"
@@ -82,9 +77,7 @@
 #include "ui_kit.h"
 #include "ui_root_style.h"
 #include "ui_nav.h"
-#if KIIKO_BOARD_METALIO47
 #include "app_weread.h"
-#endif
 
 typedef struct {
     char path[BOOK_STORE_PATH_MAX];
@@ -165,9 +158,7 @@ static bool s_home_force_full_once;
 static uint32_t s_cached_progress_revision=UINT32_MAX;
 static uint8_t *s_clock_base_cache;
 static bool s_clock_base_attempted;
-#if KIIKO_BOARD_METALIO47
 static int64_t s_component_warm_after_ms;
-#endif
 void app_home_release_clock_cache(void) {
     ui_home_clock_bind_base_cache(NULL,0);
     free(s_clock_base_cache);s_clock_base_cache=NULL;s_clock_base_attempted=false;
@@ -504,13 +495,8 @@ static EpdRect component_clock_bounds(void){return s_view==HOME_COMPONENT?(EpdRe
 static EpdRect component_clock_graphics(void){return s_view==HOME_COMPONENT?component_clock_bounds():(EpdRect){24,640,320,326};}
 static bool visible_motion_clock(void){
     return(s_view==HOME_ROOT&&ui_home_clock_has_motion(clock_style(app_settings_home_component())))
-#if KIIKO_BOARD_METALIO47
         ;
-#else
-        ||(s_view==HOME_COMPONENT&&ui_home_clock_has_motion(clock_style(s_component_browse)));
-#endif
 }
-#if KIIKO_BOARD_METALIO47
 static void component_prepare_neighbor(app_ctx_t *ctx) {
     if(s_view!=HOME_COMPONENT||s_component_pending||!s_clock_base_cache||ctx->consumed||
        (ctx->touch&&ctx->touch->touched)||ctx->now_ms<s_component_warm_after_ms)return;
@@ -535,7 +521,6 @@ static void component_prepare_neighbor(app_ctx_t *ctx) {
         free(scratch);return;
     }
 }
-#endif
 static void refresh_days(void) {
     s_reading_days_valid=date_now(&s_date)&&book_ticket_month_days(s_date.tm_year+1900,s_date.tm_mon+1,s_reading_days);
     if(!s_reading_days_valid)memset(s_reading_days,0,sizeof(s_reading_days));
@@ -683,11 +668,7 @@ static void render_root(uint8_t *fb) {
     if(s_avatar_ready)ui_wallpaper_draw_avatar(fb,s_avatar,(EpdRect){588,88,60,60},30);
     else {epd_fill_circle(618,118,30,0x30,fb);label(fb,618,118,30,"K",EPD_DRAW_ALIGN_CENTER,0xff);}
     HOME_STAGE("header");
-#if KIIKO_BOARD_METALIO47
     const uint8_t card_gray=0xff;
-#else
-    const uint8_t card_gray=0xff;
-#endif
     ui_root_card(fb,(EpdRect){36,184,612,378},28);
     home_frame(fb,(EpdRect){36,184,612,378},28);
     for(int side=0;side<2;++side) {
@@ -778,11 +759,7 @@ static void render_component_controls(uint8_t *fb) {
 static void render_components_body(uint8_t *fb) {
     if(s_component_browse==APP_HOME_FOLDER)ui_home_folder_draw(fb,s_folder,s_folder_fast,(EpdRect){132,282,420,459});
     else {
-#if KIIKO_BOARD_METALIO47
         ui_home_clock_preview_draw(fb,(EpdRect){141,294,420,460},app_settings_main_fast_refresh(),clock_style(s_component_browse));
-#else
-        clock_draw_region(fb,(EpdRect){141,294,420,460},&s_date,app_settings_main_fast_refresh(),clock_style(s_component_browse),(EpdRect){141,294,420,460},s_widget_phase);
-#endif
     }
     label(fb,342,787,36,component_name(s_component_browse),EPD_DRAW_ALIGN_CENTER,0);
     unsigned selected=component_index(s_component_browse);
@@ -844,9 +821,7 @@ static bool present(app_ctx_t *ctx,app_redraw_t redraw) {
         else render_component_controls(ctx->fb);
         if(s_press_pending)ui_draw_selected_round_rect(ctx->fb,s_pressed,s_pressed.width==64?32:38);
         enum EpdDrawError result=present_clock_area(ctx,s_area);guard_draw_result(ctx->hl,result);
-#if KIIKO_BOARD_METALIO47
         s_component_warm_after_ms=esp_timer_get_time()/1000+600;
-#endif
         if(result==EPD_DRAW_SUCCESS){s_component_pending=false;s_component_dirty=(EpdRect){0};if(visible_motion_clock()){s_widget_shown=s_date;s_widget_stamp=date_stamp(&s_date);s_widget_phase_shown=s_widget_phase;s_motion_ms=ctx->now_ms;}}
         return true;
     }
@@ -883,7 +858,6 @@ static bool present(app_ctx_t *ctx,app_redraw_t redraw) {
     if(redraw==APP_REDRAW_AREA&&s_clock_pending) {
         s_clock_pending=false;
         ui_fill_rect_fast((EpdRect){24,18,156,44},0xff,ctx->fb);ui_nav_clock_draw(ctx->fb);
-#if KIIKO_BOARD_METALIO47
         if(display_pipeline_enabled()) {
             EpdRect dirty={24,18,156,44};
             if(s_view==HOME_ROOT&&app_settings_home_component()!=APP_HOME_FOLDER) {
@@ -894,7 +868,6 @@ static bool present(app_ctx_t *ctx,app_redraw_t redraw) {
             enum EpdDrawError result=present_clock_area(ctx,dirty);
             guard_draw_result(ctx->hl,result);if(result==EPD_DRAW_SUCCESS)s_clock_minute=minute;return true;
         }
-#endif
         enum EpdDrawError result=update_display_area_diff_with(ctx->hl,&E0470_WAVEFORM,MODE_GL16,(EpdRect){24,18,156,44});
         if(result==EPD_DRAW_SUCCESS&&s_view==HOME_ROOT&&app_settings_home_component()!=APP_HOME_FOLDER) {
             date_now(&s_date);ui_home_clock_style_t style=clock_style(app_settings_home_component());
@@ -909,9 +882,7 @@ static bool present(app_ctx_t *ctx,app_redraw_t redraw) {
     else if(redraw==APP_REDRAW_FULL||s_home_force_full_once) {s_home_force_full_once=false;result=update_display_full(ctx->hl);}
     else result=update_display_fast_page(ctx->hl);
     guard_draw_result(ctx->hl,result);
-#if KIIKO_BOARD_METALIO47
     if(s_view==HOME_COMPONENT)s_component_warm_after_ms=esp_timer_get_time()/1000+600;
-#endif
     if(redraw!=APP_REDRAW_AREA&&result==EPD_DRAW_SUCCESS){s_clock_minute=minute;
         if(s_view==HOME_TIME){s_time_stamp=date_stamp(&s_date);s_time_phase_shown=s_time_phase;}
         if(visible_motion_clock()){s_widget_shown=s_date;s_widget_stamp=date_stamp(&s_date);s_widget_phase_shown=s_widget_phase;}
@@ -934,10 +905,8 @@ static void on_enter(app_ctx_t *ctx) {
     s_cover_next=0;s_cover_waiting=false;s_cover_retry_ms=0;
     const uint32_t progress_revision=book_progress_revision();
     s_clock_base_attempted=false;clock_base_prepare();
-#if KIIKO_BOARD_METALIO47
     // Complete previews include font-rendered numerals; discard after returning from font/settings pages.
     ui_home_clock_preview_invalidate();
-#endif
     s_widget_trail.valid=s_time_trail.valid=false;
     (void)ctx;s_view=HOME_ROOT;s_clock_pending=s_time_pending=s_widget_pending=s_component_pending=false;s_press_pending=false;s_save_error=false;s_time_stamp=s_widget_stamp=-1;s_motion_ms=-100;
     s_home_force_full_once=app_settings_home_full_refresh();refresh_days();avatar_prepare_state();
@@ -964,10 +933,7 @@ static void on_enter(app_ctx_t *ctx) {
 }
 static void on_media_lost(app_ctx_t *ctx) {
     app_book_home_shelf_warm_stop();
-#if KIIKO_BOARD_METALIO47
     metalio_cover_cache_clear();
-#else
-#endif
     app_home_release_clock_cache();
     (void)ctx;clear_cover_cache(true);memset(&s_current,0,sizeof(s_current));memset(s_recent,0,sizeof(s_recent));
     s_books_cache_valid=false;s_excerpt[0]=0;s_avatar_ready=s_avatar_pending=false;
@@ -1023,9 +989,7 @@ static app_redraw_t on_tick(app_ctx_t *ctx) {
     // 只为正在预览的书夹准备封面；切到时钟即停止隐藏文件处理。
     // Prepare covers only for the visible folder preview; switching to a clock stops hidden media work.
     if(s_view==HOME_COMPONENT&&!folder_preview){
-#if KIIKO_BOARD_METALIO47
         component_prepare_neighbor(ctx);
-#endif
         return APP_REDRAW_NONE;
     }
     if(s_view==HOME_GOAL)return APP_REDRAW_NONE;
@@ -1076,12 +1040,10 @@ static EpdRect control(int x,int y) {
 static app_redraw_t on_gesture(app_ctx_t *ctx,const ui_gesture_event_t *ev) {
     if(ev->type==UI_GESTURE_PRESS) {
         s_pressed=control(ev->x0,ev->y0);
-#if KIIKO_BOARD_METALIO47
         s_component_warm_after_ms=ctx->now_ms+600;
         // 箭头不先推屏，松手后的新样式承担本次反馈，避免连续两次扫描。
         // Let the released arrow's new style provide feedback in one output, without a preceding press scan.
         if(s_view==HOME_COMPONENT&&s_pressed.width==64){s_press_pending=false;return APP_REDRAW_NONE;}
-#endif
         s_press_pending=s_pressed.width>0;
         if(s_press_pending){s_area=control_feedback_area(s_pressed);return APP_REDRAW_AREA;}
         return APP_REDRAW_NONE;
@@ -1089,9 +1051,7 @@ static app_redraw_t on_gesture(app_ctx_t *ctx,const ui_gesture_event_t *ev) {
     bool restore=s_press_pending;
     if(ev->type==UI_GESTURE_MOVE) {if(s_press_pending&&!hit(continue_card_pressed()?continue_card_hit_rect():s_pressed,ev->x,ev->y)){s_press_pending=false;s_area=control_feedback_area(s_pressed);return APP_REDRAW_AREA;}return APP_REDRAW_NONE;}
     s_press_pending=false;
-#if KIIKO_BOARD_METALIO47
     s_component_warm_after_ms=ctx->now_ms+600;
-#endif
     if(ev->type==UI_GESTURE_LONG_PRESS&&s_view==HOME_ROOT&&hit((EpdRect){24,640,320,365},ev->x0,ev->y0)) {
         s_component_browse=app_settings_home_component();s_view=HOME_COMPONENT;s_save_error=false;return APP_REDRAW_PAGE;
     }
@@ -1101,19 +1061,13 @@ static app_redraw_t on_gesture(app_ctx_t *ctx,const ui_gesture_event_t *ev) {
         if(ev->type==UI_GESTURE_TAP&&hit((EpdRect){584,472,64,64},ev->x0,ev->y0))direction=1;
         if(direction){
             unsigned index=component_index(s_component_browse);
-#if KIIKO_BOARD_METALIO47
             bool was_current=s_component_browse==app_settings_home_component(),had_error=s_save_error;
-#endif
             s_component_browse=s_components[(index+HOME_COMPONENT_OPTIONS+direction)%HOME_COMPONENT_OPTIONS];
             s_save_error=false;s_widget_pending=false;
-#if KIIKO_BOARD_METALIO47
             // 只有“使用此样式/返回首页”改变或清理保存错误时才包含底部按钮。
             // Include the apply button only when its label changes or a save error must be cleared.
             bool controls=had_error||was_current!=(s_component_browse==app_settings_home_component());
             EpdRect next={36,260,612,controls?812:716};
-#else
-            EpdRect next={36,260,612,812};
-#endif
             s_area=s_component_dirty=s_component_pending?ui_rect_union(s_component_dirty,next):next;
             s_component_pending=true;
             return APP_REDRAW_AREA;
@@ -1150,13 +1104,9 @@ static app_redraw_t on_gesture(app_ctx_t *ctx,const ui_gesture_event_t *ev) {
         }
         if(hit(continue_card_hit_rect(),x,y)) {
             home_book_t *b=featured();
-#if KIIKO_BOARD_METALIO47
             if(b->path[0] && app_weread_confirm_open(ctx,b->path,true)) return APP_REDRAW_NONE;
-#endif
             if(b->path[0] && app_book_request_open_from_home(b->path)){
-#if KIIKO_BOARD_METALIO47
                 (void)metalio_haptic_click();
-#endif
                 ui_nav_request(ctx,1);return APP_REDRAW_NONE;
             }
             if(restore){s_area=control_feedback_area(s_pressed);return APP_REDRAW_AREA;}

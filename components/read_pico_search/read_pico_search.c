@@ -12,23 +12,9 @@
 #include <string.h>
 #include "search_table.h"
 #include "search_candidates.h"
-#if !KIIKO_BOARD_METALIO47
-#include "search_packed.h"
-// Fixed-width immutable data: direct random access, no decompression buffer or heap.
-static uint32_t search_unpack(const uint8_t *data,size_t i,unsigned bits) {
-    size_t bit=i*bits,offset=bit/8;
-    uint32_t word=(uint32_t)data[offset]|((uint32_t)data[offset+1]<<8)|
-        ((uint32_t)data[offset+2]<<16)|((uint32_t)data[offset+3]<<24);
-    return (word>>(bit%8))&((1u<<bits)-1);
-}
-static uint32_t search_codepoint_at(size_t i) { return search_unpack(search_packed_codepoints,i,SEARCH_PACKED_CODEPOINTS_BITS); }
-static uint16_t search_group_at(size_t i) { return (uint16_t)search_unpack(search_packed_groups,i,SEARCH_PACKED_GROUPS_BITS); }
-#define SEARCH_CODEPOINT_COUNT SEARCH_PACKED_COUNT
-#else
 static uint32_t search_codepoint_at(size_t i) { return search_codepoints[i]; }
 static uint16_t search_group_at(size_t i) { return search_groups[i]; }
 #define SEARCH_CODEPOINT_COUNT (sizeof(search_codepoints)/sizeof(search_codepoints[0]))
-#endif
 
 
 static unsigned char lower(unsigned char c) {

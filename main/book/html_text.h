@@ -18,9 +18,7 @@
 #define HTML_TEXT_MAX_BLOCKS 16384u
 #define HTML_RUN_MAX 32768u
 
-#if KIIKO_BOARD_METALIO47
 bool html_weread_position(const char *html, size_t len, bool to_cloud, unsigned position, unsigned *mapped);
-#endif
 
 /// 块内一段同字体的字节区间。/ A same-face byte span inside one block.
 typedef struct {

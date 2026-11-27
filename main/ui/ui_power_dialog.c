@@ -171,11 +171,7 @@ static bool control_overlap(EpdRect a,EpdRect b) {
 static void power_control_base(uint8_t *fb,int slot,bool glass) {
     EpdRect r=slot?power_button_rect(slot):power_track_rect();
     int radius=slot?UI_POWER_BUTTON_R:UI_POWER_TRACK_H/2;
-#if KIIKO_BOARD_METALIO47
     bool drawn=glass&&ui_glass_panel_frost(fb,r,radius,52,160,true);
-#else
-    bool drawn=glass&&ui_glass_panel(fb,r,radius,25,160);
-#endif
     if(!drawn){
         ui_fill_round_rect(fb,r,radius,slot?0xf0:0xd0);
         ui_draw_control_frame(fb,r,radius,0x70);

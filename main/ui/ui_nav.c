@@ -25,10 +25,7 @@
 #include "ui_kit.h"
 #include "settings.h"
 #include "ui_click_feedback.h"
-#if KIIKO_BOARD_METALIO47
 #include "metalio_hw.h"
-#else
-#endif
 #include "ttf_font.h"
 #include "ui_font.h"
 
@@ -110,10 +107,8 @@ static void status_fit_signature(char *text, int width) {
 }
 
 static const char *const labels[] = {"首页", "书架",
-#if KIIKO_BOARD_METALIO47
     "微信读书",
     "应用",
-#endif
     "文件管理", "设置"};
 static int s_power_signature=-1000;
 static int power_signature(void) {
@@ -150,10 +145,8 @@ static void icon(uint8_t *fb, int tab, int cx, int y) {
     // The four bar icons stay on upstream Lucide line art at the status-bar stroke weight; y is the box top.
     static const ui_icon_t tabs[UI_TAB_COUNT] = {
         UI_ICON_HOUSE, UI_ICON_LIBRARY_BIG,
-#if KIIKO_BOARD_METALIO47
         UI_ICON_BOOK_OPEN,
         UI_ICON_LAYOUT_GRID,
-#endif
         UI_ICON_FOLDER_OPEN, UI_ICON_SLIDERS_HORIZONTAL,
     };
     if (tab < 0 || tab >= UI_TAB_COUNT) return;

@@ -13,7 +13,7 @@
 #>
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("pico", "metalio47", "metalio_s31", "all")]
+    [ValidateSet("metalio47", "metalio_s31", "all")]
     [string]$Board,
     [string]$Output = "build/boards",
     [string]$Python = "python",

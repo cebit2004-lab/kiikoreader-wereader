@@ -62,7 +62,6 @@ static bool s_input_layout, s_input_settle;
 static const char *const k_tabs[MUSIC_SRC_COUNT] = {"热歌榜", "我喜欢", "每日推荐", "搜索"};
 
 static EpdRect tab_rect(int i) { return (EpdRect){36 + i * 153, TAB_TOP, 153, TAB_H}; }
-static EpdRect row_rect(int row) { return (EpdRect){36, LIST_TOP + row * ROW_H, 612, ROW_H}; }
 static EpdRect ctrl_rect(int i) { return (EpdRect){36 + i * 156, 1100, 144, 88}; }
 static EpdRect progress_rect(void) { return (EpdRect){36, 1032, 612, 52}; }
 
@@ -272,10 +271,13 @@ static bool music_present(app_ctx_t *ctx, app_redraw_t redraw) {
 static void select_source(music_source_t source) {
     s_page = 0;
     if (source == MUSIC_SRC_SEARCH) {
+        // 切到搜索只换来源、不发请求（空搜索词不请求服务器）；已在搜索就直接改搜索词。两种情况都打开键盘。
+        // Switching to search only changes the source with no request (an empty query never hits the server);
+        // already on search, just edit the query. Either way the keyboard opens.
         music_status_t st;
         music_get_status(&st);
-        music_load(MUSIC_SRC_SEARCH, st.list_source == MUSIC_SRC_SEARCH ? st.query : "", 0);
-        if (!st.query[0] || st.list_source == MUSIC_SRC_SEARCH) open_search();
+        if (st.list_source != MUSIC_SRC_SEARCH) music_load(MUSIC_SRC_SEARCH, "", 0);
+        open_search();
         return;
     }
     music_load(source, NULL, 0);

@@ -20,10 +20,7 @@
 #include "display.h"
 #include "e0470_epaper_waveform.h"
 #include "read_pico_pmu.h"
-#if KIIKO_BOARD_METALIO47
 #include "metalio_hw.h"
-#else
-#endif
 #include "ble_page_turner.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
@@ -47,11 +44,9 @@ static uint64_t wallpaper_key(void){
     const char *path=app_settings_lock_style()==3?app_settings_bookmark_path():app_settings_wallpaper_path();
     uint64_t key=UINT64_C(14695981039346656037);
     for(const unsigned char *p=(const unsigned char*)path;*p;++p)key=(key^*p)*UINT64_C(1099511628211);
-#if KIIKO_BOARD_METALIO47
     // 透明书封合成策略变化只使旧完整书封帧失效，PNG图层与其他锁屏缓存继续复用。
     // A cover-policy change invalidates only old composed cover frames, retaining PNG layers and other lock styles.
     if(app_settings_lock_style()==3)key=(key^UINT64_C(0x5345414c00000001))*UINT64_C(1099511628211);
-#endif
     struct stat st;
     if(stat(path,&st)==0){
         uint64_t info[2]={(uint64_t)st.st_size,(uint64_t)st.st_mtime};
@@ -108,11 +103,9 @@ static void present_input(EpdiyHighlevelState *hl,EpdRect area){
 
 void lock_screen_authenticate(EpdiyHighlevelState *hl,cst836u_handle_t touch,sc7a20h_handle_t acc,bool boot){
     if(!lock_pin_enabled())return;
-#if KIIKO_BOARD_METALIO47
     // 硬件重新开机仍验证；宽限期只用于本次锁屏的真实按键唤醒。
     // Hardware boots still authenticate; grace applies only after a real key wake in this lock session.
     const bool allow_grace=!boot;
-#endif
     uint8_t *fb=epd_hl_get_framebuffer(hl);
     (void)acc;
     (void)ble_pt_stop(2000);
@@ -120,25 +113,15 @@ void lock_screen_authenticate(EpdiyHighlevelState *hl,cst836u_handle_t touch,sc7
     uint8_t *original=heap_caps_get_free_size(MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)>FRAME_BYTES+1024u*1024u
         ?heap_caps_malloc(FRAME_BYTES,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT):NULL;
     if(original)memcpy(original,fb,FRAME_BYTES);
-#if KIIKO_BOARD_METALIO47
     ui_fill_rect_fast((EpdRect){0,0,UI_LOCK_WIDTH,UI_LOCK_HEIGHT},UI_GRAY_WHITE,fb);
-#endif
     ui_pinpad_t pad={0};ui_pinpad_begin(&pad,fb,"输入密码");
-#if KIIKO_BOARD_METALIO47
     restore_art(fb,original);
-#endif
     bool waiting=true;
-#if KIIKO_BOARD_METALIO47
     bool art_visible=!boot;
-#else
-#endif
     unsigned failures=0;int64_t retry_at=0;
     for(;;){
-#if KIIKO_BOARD_METALIO47
         bool real_key_wake=false;
-#endif
         if(waiting){
-#if KIIKO_BOARD_METALIO47
             // 入口已经显示拼贴，不重复推屏，也不丢弃生成/缓存期间收到的短按。
             // The entry already presented the collage; preserve clicks during composition/cache setup.
             if(!art_visible){
@@ -154,19 +137,8 @@ void lock_screen_authenticate(EpdiyHighlevelState *hl,cst836u_handle_t touch,sc7
                 // The S31 wait transaction owns timed power-off; a returned timeout still requires authentication.
                 art_visible=true;
                 continue;
-#else
-            restore_art(fb,original);present(hl,ui_pinpad_full());
-            if(!boot)app_lock_wait_key_idle(800);
-            epd_poweroff();
-            if(app_light_sleep_wait_timed(NULL,10u*60u*1000u)==APP_WAKE_TIMEOUT){
-                ui_pinpad_end(&pad);free(original);app_enter_host_sleep(APP_SLEEP_DEEP);
-                // 防御性处理：电源交接意外返回也继续验证。/ Defensive: a returning power handoff still requires verification.
-                original=NULL;ui_pinpad_begin(&pad,fb,"输入密码");
-                continue;
-#endif
             }
         }
-#if KIIKO_BOARD_METALIO47
         // 等待结束才复核；超时、共享IRQ和时钟异常不能获得免密资格。
         // Recheck after waiting; timeout/shared IRQ/invalid time cannot grant grace.
         if(real_key_wake && allow_grace && lock_pin_available() && lock_pin_grace_active()) {
@@ -177,20 +149,10 @@ void lock_screen_authenticate(EpdiyHighlevelState *hl,cst836u_handle_t touch,sc7
         ui_pinpad_reset(&pad,"输入密码",lock_pin_available()?"":"凭据读取失败，请重启后重试");
         if(!lock_pin_available())pad.blocked=true;
         else if(esp_timer_get_time()/1000<retry_at){pad.blocked=true;snprintf(pad.notice,sizeof(pad.notice),"请等待 10 秒后重试");}
-#else
-        app_lock_wait_key_idle(800);
-        ui_pinpad_reset(&pad,"输入密码","");
-        if(esp_timer_get_time()/1000<retry_at){pad.blocked=true;snprintf(pad.notice,sizeof(pad.notice),"请等待 10 秒后重试");}
-#endif
         // 直接推送完整密码画面一次，不再补刷第二段背景。/ Present the complete PIN screen once, without a second backdrop stage.
-#if KIIKO_BOARD_METALIO47
         ui_fill_rect_fast((EpdRect){0,0,UI_LOCK_WIDTH,UI_LOCK_HEIGHT},UI_GRAY_WHITE,fb);
-#endif
         ui_pinpad_paint(fb,&pad,ui_pinpad_full());present(hl,ui_pinpad_full());
-#if KIIKO_BOARD_METALIO47
         art_visible=false;
-#else
-#endif
         // 密码等待不是启动失败；待验证时保留一次性恢复，不提前开书。
         // Waiting for a PIN is not a failed boot; hold one-shot resume without opening the book.
         if(boot){pico_boot_ready();pico_boot_hold_resume();boot=false;}

@@ -61,7 +61,6 @@ enum EpdDrawError e0470_page_turn_with_waveform_compact(
     const EpdWaveform* waveform, unsigned bands
 );
 
-#if KIIKO_BOARD_METALIO47
 /// S31阅读专用：尾部两带同步启动和收尾，每像素相位完整；主页/侧滑保持原条带入口。
 /// S31 reader only: launch/finish the last pair together with every pixel phase intact; main pages/edge-back retain the original entry.
 enum EpdDrawError e0470_reader_ripple_with_waveform(
@@ -74,7 +73,6 @@ enum EpdDrawError e0470_reader_ripple_with_waveform(
 enum EpdDrawError e0470_text_turn_with_waveform(
     EpdiyHighlevelState* hl, EpdRect area, e0470_turn_dir_t dir, const EpdWaveform* waveform
 );
-#endif
 
 /// 倒置竖屏的上下柔和区与中间校准区同时逐相输出；区域须全逻辑宽、32列对齐。
 /// Inverted portrait: output soft chrome and calibrated middle art in the same phases; full logical width and 32-column alignment are required.
@@ -89,11 +87,9 @@ enum EpdDrawError e0470_update_regions(
     enum EpdDrawMode strong_mode
 );
 
-#if KIIKO_BOARD_METALIO47
 /// S31列表原厂GC48清理：精确裁剪，不扩展到题头/底栏；成功才提交真实back。
 /// S31 list cleanup with raw GC48: exact crop without header/footer expansion; commit the real baseline only on success.
 enum EpdDrawError e0470_update_native_area(EpdiyHighlevelState* hl,EpdRect area,const EpdWaveform* waveform);
-#endif
 
 #ifdef __cplusplus
 }

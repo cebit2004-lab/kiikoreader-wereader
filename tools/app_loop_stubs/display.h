@@ -10,10 +10,8 @@ static inline void display_page_prepare_end(bool held){(void)held;}
 
 enum EpdDrawError update_display_click_feedback(EpdiyHighlevelState* hl,EpdRect area);
 bool display_main_fast_background_set(bool);
-#if KIIKO_BOARD_METALIO47
 bool display_main_switch_erase_set(bool);
 bool display_main_shelf_home_erase_set(bool);
 enum EpdDrawError update_display_gray_transition(EpdiyHighlevelState* hl,EpdRect area);
-#endif
 
 unsigned display_main_quality_set(unsigned);

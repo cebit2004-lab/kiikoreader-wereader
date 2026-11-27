@@ -194,7 +194,6 @@ static size_t epub_entry_count(book_epub_t *book) {
     if (!book) return 0;
     return book->zip ? zip_entry_count(book->zip) : virtual_entry_total(&book->vsrc);
 }
-#if KIIKO_BOARD_METALIO47
 static int epub_prefetch_step(book_epub_t *book, int index) {
     if (!book || !book->zip) return -1; // 虚拟源没有需要预热的压缩流
     return zip_prefetch_step(book->zip, index);
@@ -209,7 +208,6 @@ static esp_err_t epub_resume_io(book_epub_t *book) {
     if (!book->source_path[0]) return ESP_FAIL;
     return zip_resume_io(book->zip, book->source_path);
 }
-#endif
 typedef enum { XML_OPEN, XML_CLOSE, XML_TEXT } xml_kind_t;
 typedef struct {
     xml_kind_t kind; ///< token 类型 / Token kind
@@ -2226,13 +2224,10 @@ esp_err_t book_epub_load_anchor(book_epub_t *book, size_t i, const char *anchor,
 esp_err_t book_epub_load(book_epub_t *book, size_t i, html_text_t *out) {
     return book_epub_load_anchor(book, i, NULL, NULL, out);
 }
-#if KIIKO_BOARD_METALIO47
 int book_epub_prefetch_step(book_epub_t *book,size_t chapter) {
     if(!book||chapter>=book->count)return -1;
     return epub_prefetch_step(book, book->chapters[chapter].zip_index);
 }
-#else
-#endif
 esp_err_t book_epub_image(book_epub_t *book, size_t chapter, const char *src,
                           uint8_t **data, size_t *size, bool *png) {
     if (!book || chapter >= book->count || !src || !data || !size || !png) return ESP_ERR_INVALID_ARG;
@@ -2516,7 +2511,6 @@ esp_err_t book_epub_image_dimensions(book_epub_t *book, size_t chapter, const ch
     }
     return err;
 }
-#if KIIKO_BOARD_METALIO47
 
 esp_err_t book_epub_suspend_io(book_epub_t *book) {
     return book && !book->source_path[0] ? ESP_FAIL : epub_suspend_io(book);
@@ -2524,5 +2518,3 @@ esp_err_t book_epub_suspend_io(book_epub_t *book) {
 esp_err_t book_epub_resume_io(book_epub_t *book) {
     return epub_resume_io(book);
 }
-#else
-#endif

@@ -62,7 +62,6 @@ enum EpdDrawError update_display_fast_page(EpdiyHighlevelState* hl);
 /// 为下一次主页面输出启用固定底栏；标记书架切出与真正切页，避免同页重绘播放动画。
 /// Arm fixed navigation for the next main-screen output; tag shelf exit and actual navigation so same-page repaints do not animate.
 void display_main_transition_arm(const void* owner, bool leaving_shelf, bool changing_page);
-#if KIIKO_BOARD_METALIO47
 /// 仅真实快刷跨主页的背景擦白许可；调用后须恢复原值。/ Scoped fast root background permission; restore after presentation.
 bool display_main_fast_background_set(bool active);
 /// Scope extra white erasure to an actual switch between visible main tabs; returns the previous scope.
@@ -83,7 +82,6 @@ void display_monochrome_frame(uint8_t* fb);
 bool display_system_binary_set(bool enabled);
 /// 常驻底栏的根页/子页保留灰阶，只二值化内容，返回旧值供恢复。/ Persistent root/child navigation retains gray; binarize content only and return the prior scope.
 bool display_system_navigation_set(bool visible);
-#endif
 /// 系统侧滑用主页灰阶水波纹，独立于阅读文字序列；区域必须是逻辑坐标。
 /// System edge returns use main-gray ripple independently of reader text; the area uses logical coordinates.
 enum EpdDrawError update_display_main_turn(EpdiyHighlevelState* hl, EpdRect area, e0470_turn_dir_t dir);
@@ -97,10 +95,8 @@ void display_main_transition_disarm(void);
 /// 取消尚未使用的入口；不打断物理波形，无延迟补刷任务。
 /// Cancel unused permission without interrupting a physical waveform; no deferred completion exists.
 void display_main_transition_cancel(void);
-#if KIIKO_BOARD_METALIO47
 /// 注册书架封面及书夹区，供独立37相实验使用；普通灰区不启用。/ Register shelf art for the isolated37-phase experiment; generic gray bands are unaffected.
 void display_main_transition_cover_bands(const EpdRect* bands, unsigned count);
-#endif
 enum EpdDrawError update_display_from_white(EpdiyHighlevelState* hl);
 enum EpdDrawError update_display_from_white_with(
     EpdiyHighlevelState* hl, const EpdWaveform* waveform, enum EpdDrawMode mode
@@ -141,11 +137,9 @@ enum EpdDrawError update_display_area_diff_with(
     EpdiyHighlevelState* hl, const EpdWaveform* waveform, enum EpdDrawMode mode,
     EpdRect area
 );
-#if KIIKO_BOARD_METALIO47
 /// S31列表按身份/范围累计真实滚动；每八次用原厂GC48替换当次输出，不额外补刷。
 /// S31 lists accrue changed scrolls by identity/crop; every eighth output uses raw GC48 without an extra pass.
 enum EpdDrawError update_display_settings_list(EpdiyHighlevelState* hl,unsigned list_id,EpdRect area);
-#endif
 /// area始终为旋转后逻辑坐标，勿传物理epd_full_screen。/ area always uses rotated logical coordinates, never physical epd_full_screen.
 /// 阅读页可选的真实错相 GL16 翻页；缺相位时回退现有 GL16，失败时恢复基准帧。
 /// 纯文字水波纹复用柔和文字灰边，8带节拍不变；缺相回退GL16，扫描失败重建真实基准。
@@ -154,13 +148,10 @@ enum EpdDrawError update_display_water_turn(EpdiyHighlevelState* hl, EpdRect are
                                              e0470_turn_dir_t dir);
 /// 同步普通文字翻页沿用水波纹的全部灰阶相位，单带同时输出并恢复原节拍。/ Ordinary text uses all ripple gray phases in one synchronous band and restores pacing.
 enum EpdDrawError update_display_text_turn(EpdiyHighlevelState* hl, EpdRect area, e0470_turn_dir_t dir);
-#if KIIKO_BOARD_METALIO47
 /// S31图文：同色保持，实际灰阶迁移用完整灰阶，黑白目标用原厂DU20，不量化图片。
 /// S31 images: hold equal pixels; retain complete gray transitions or native DU20 for actual BW changes, without quantization.
 enum EpdDrawError update_display_gray_transition(EpdiyHighlevelState* hl, EpdRect area);
-#endif
 
-#if KIIKO_BOARD_METALIO47
 /// 已验证未变正文上的面板：保留原厂GL48及完整目标灰阶，一次区域定稿；不借文字22相或速读黑白。
 /// Panels over verified unchanged text retain vendorGL48/full target grays in one regional settle, independent of text22-phase/FastBW.
 enum EpdDrawError update_display_reader_panel(EpdiyHighlevelState* hl,EpdRect area);
@@ -170,7 +161,6 @@ enum EpdDrawError update_display_reader_panel_fast(EpdiyHighlevelState* hl,EpdRe
 /// 两个设置面板四灰实验：进入时加强底页擦除，反馈仍16相；故障后37/48，手动/故障清理48相。
 /// Four-gray settings strengthen underlay erasure on entry,retain16-phase feedback,37/48 fallback and48-phase recovery.
 enum EpdDrawError update_display_reader_panel_gray4(EpdiyHighlevelState* hl,EpdRect area,bool erase_underlay);
-#endif
 /// 动画中间帧使用灰阶波形，但不累计周期清屏计数；动画最终帧走普通刷新出口。
 /// Use grayscale for animation strips without advancing periodic cleanup; the final frame uses the normal path.
 

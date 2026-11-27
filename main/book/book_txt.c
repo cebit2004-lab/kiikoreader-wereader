@@ -51,9 +51,7 @@ typedef struct {
 #ifdef ESP_PLATFORM
     uint8_t refills; ///< 每512KiB让出一次，不给单章加载增加固定等待 / Yield every512KiB, without a fixed per-chapter wait
 #endif
-#if KIIKO_BOARD_METALIO47
     uint8_t utf16; ///< UTF16字节序 / UTF16 byte order
-#endif
 } reader_t;
 
 // 验证一个 UTF-8 标量；无效时仅消费首字节。/ Validate one UTF-8 scalar; consume only its first byte on error.
@@ -75,7 +73,6 @@ static size_t encode(uint32_t cp, char out[4]) {
     if (cp < 0x10000) { out[0] = 0xe0 | (cp >> 12); out[1] = 0x80 | ((cp >> 6) & 63); out[2] = 0x80 | (cp & 63); return 3; }
     out[0] = 0xf0 | (cp >> 18); out[1] = 0x80 | ((cp >> 12) & 63); out[2] = 0x80 | ((cp >> 6) & 63); out[3] = 0x80 | (cp & 63); return 4;
 }
-#if KIIKO_BOARD_METALIO47
 static uint16_t utf16_unit(const unsigned char *s, bool be) {
     return be?((uint16_t)s[0]<<8)|s[1]:((uint16_t)s[1]<<8)|s[0];
 }
@@ -108,7 +105,6 @@ static uint8_t utf16_probe(const unsigned char *s,size_t n) {
         errors+=cp==0xfffd&&utf16_unit(s+i,result==2)!=0xfffd;++scalars;i+=k;}
     return errors*100>scalars?0:result;
 }
-#endif
 static bool next(reader_t *r, uint32_t *cp) {
     if (r->used - r->pos < 4) {
         size_t tail = r->used - r->pos;
@@ -121,10 +117,8 @@ static bool next(reader_t *r, uint32_t *cp) {
     size_t n = r->used - r->pos;
     if (!n) return false;
     const unsigned char *s = r->bytes + r->pos; size_t k = 1;
-#if KIIKO_BOARD_METALIO47
     if(r->utf16)k=utf16_one(s,n,r->utf16==2,cp);
     else
-#endif
     if (!r->gbk) k = utf8_one(s, n, cp);
     else if (s[0] < 0x80) *cp = s[0];
     else {
@@ -135,9 +129,7 @@ static bool next(reader_t *r, uint32_t *cp) {
 }
 static esp_err_t reset(reader_t *r, book_txt_t *b, uint32_t offset) {
     memset(r, 0, sizeof(*r)); r->file = b->file; r->gbk = b->gbk; r->offset = offset;
-#if KIIKO_BOARD_METALIO47
     r->utf16=b->utf16;
-#endif
     clearerr(b->file);
     return fseek(b->file, (long)offset, SEEK_SET) ? ESP_FAIL : ESP_OK;
 }
@@ -509,9 +501,7 @@ size_t book_txt_nav_position(const book_txt_t *b,size_t chapter,size_t text_offs
     return lo?lo-1:0;
 }
 static size_t title_scalar(const book_txt_t *b,const unsigned char *s,size_t n,uint32_t *cp) {
-#if KIIKO_BOARD_METALIO47
     if(b->utf16)return utf16_one(s,n,b->utf16==2,cp);
-#endif
     if(!b->gbk)return utf8_one(s,n,cp);
     if(s[0]<0x80){*cp=s[0];return 1;}
     *cp=0xfffd;
@@ -641,11 +631,7 @@ static bool txt_cache_load(const char *source,book_txt_t *b) {
         payload.nav_count<=TXT_NAV_MAX && payload.gbk<=1;
     unsigned volumes=payload.reserved[1]|((unsigned)payload.reserved[2]<<8);
     ok=ok&&volumes<=TXT_VOLUME_MAX&&(!volumes||payload.nav_count);
-#if KIIKO_BOARD_METALIO47
     ok=ok&&payload.reserved[0]<=2&&(!payload.reserved[0]||(!payload.gbk&&(payload.bom==0||payload.bom==2)));
-#else
-    ok=ok&&!payload.reserved[0];
-#endif
     uint32_t expected_hash=payload.checksum;payload.checksum=0;
     uint32_t hash=index_hash(UINT32_C(2166136261),&payload,sizeof(payload));
     if(ok){
@@ -692,9 +678,7 @@ static bool txt_cache_load(const char *source,book_txt_t *b) {
     fclose(cache);
     if(!ok){nav_clear(b);b->count=0;return false;}
     b->bom=payload.bom;b->gbk=payload.gbk!=0;b->count=payload.count;
-#if KIIKO_BOARD_METALIO47
     b->utf16=payload.reserved[0];
-#endif
     return true;
 }
 
@@ -709,11 +693,7 @@ uint16_t book_txt_cached_chapter_count(const char *source,uint32_t size,int64_t 
         p.count&&p.count<=BOOK_CHAPTER_MAX&&p.nav_count<=TXT_NAV_MAX&&p.gbk<=1;
     unsigned volumes=p.reserved[1]|((unsigned)p.reserved[2]<<8);
     ok=ok&&volumes<=TXT_VOLUME_MAX&&(!volumes||p.nav_count);
-#if KIIKO_BOARD_METALIO47
     ok=ok&&p.reserved[0]<=2&&(!p.reserved[0]||(!p.gbk&&(p.bom==0||p.bom==2)));
-#else
-    ok=ok&&!p.reserved[0];
-#endif
     uint32_t expected=p.checksum;p.checksum=0;
     uint32_t hash=index_hash(UINT32_C(2166136261),&p,sizeof(p));
     size_t remaining=ok?p.count*sizeof(book_entry_t)+p.nav_count*sizeof(txt_nav_t)+volumes*sizeof(book_txt_volume_t):0;
@@ -730,9 +710,7 @@ static void txt_cache_save(const char *source,const book_txt_t *b) {
     txt_cache_payload_t payload={.total=b->total,.bom=b->bom,.count=(uint32_t)b->count,
         .nav_count=(uint32_t)b->nav_count,.gbk=b->gbk};
     payload.reserved[1]=(uint8_t)b->volume_count;payload.reserved[2]=(uint8_t)(b->volume_count>>8);
-#if KIIKO_BOARD_METALIO47
     payload.reserved[0]=b->utf16;
-#endif
     uint32_t hash=index_hash(UINT32_C(2166136261),&payload,sizeof(payload));
     hash=index_hash(hash,b->entries,b->count*sizeof(*b->entries));
     for(size_t i=0;i<b->nav_count;++i)hash=index_hash(hash,nav_at(b,i),sizeof(txt_nav_t));
@@ -750,9 +728,7 @@ static void txt_cache_save(const char *source,const book_txt_t *b) {
 }
 
 esp_err_t book_txt_open(book_txt_t *b, const char *path) {
-#if KIIKO_BOARD_METALIO47
     b->utf16=0;b->gbk=false;b->bom=0;
-#endif
     b->file = fopen(path, "rb"); if (!b->file) return ESP_ERR_NOT_FOUND;
     if (fseek(b->file, 0, SEEK_END)) return ESP_FAIL;
     long size = ftell(b->file);
@@ -767,14 +743,10 @@ esp_err_t book_txt_open(book_txt_t *b, const char *path) {
     if (!err) {
         size_t n = fread(r->bytes, 1, READ_BLOCK + 3, b->file);
         if (ferror(b->file)) err = ESP_FAIL;
-#if KIIKO_BOARD_METALIO47
         else if(n>=2&&r->bytes[0]==0xff&&r->bytes[1]==0xfe){b->utf16=1;b->bom=2;}
         else if(n>=2&&r->bytes[0]==0xfe&&r->bytes[1]==0xff){b->utf16=2;b->bom=2;}
-#endif
         else if (n >= 3 && !memcmp(r->bytes, "\xef\xbb\xbf", 3)) b->bom = 3;
-#if KIIKO_BOARD_METALIO47
         else if((b->utf16=utf16_probe(r->bytes,n))!=0){}
-#endif
         else for (size_t i = 0; i < n && i < READ_BLOCK;) {
             uint32_t cp; size_t k = utf8_one(r->bytes + i, n - i, &cp);
             if (k == 1 && r->bytes[i] >= 0x80) { b->gbk = true; break; } i += k;

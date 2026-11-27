@@ -119,12 +119,6 @@ static void text(uint8_t *fb,int cx,int cy,int em,const char *value,uint8_t colo
     }
     free(mask);
 }
-static bool rounded_inside(float x,float y,float left,float top,float width,float height,float radius){
-    if(x<left||x>left+width||y<top||y>top+height)return false;
-    float cx=x<left+radius?left+radius:x>left+width-radius?left+width-radius:x;
-    float cy=y<top+radius?top+radius:y>top+height-radius?top+height-radius:y;
-    float dx=x-cx,dy=y-cy;return dx*dx+dy*dy<=radius*radius;
-}
 static void paint(uint8_t *fb,const ui_pinpad_t *pad,EpdRect area){
     int right=area.x+area.width,bottom=area.y+area.height;
     for(int y=area.y;y<bottom&&y<PAD_H;++y)for(int x=area.x;x<right&&x<PAD_W;++x)

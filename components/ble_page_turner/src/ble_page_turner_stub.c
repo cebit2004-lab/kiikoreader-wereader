@@ -24,10 +24,8 @@ void ble_pt_sync(bool wanted) { (void)wanted; }
 bool ble_pt_take_start_failure(char *out, size_t cap) { no_reason(out, cap); return false; }
 void ble_pt_reset_failure(void) {}
 esp_err_t ble_pt_stop(uint32_t timeout_ms) { (void)timeout_ms; return ESP_OK; }
-#if KIIKO_BOARD_METALIO47
 esp_err_t ble_pt_suspend_for_sleep(void) { return ESP_OK; }
 void ble_pt_resume_after_sleep(void) {}
-#endif
 bool ble_pt_running(void) { return false; }
 // 没有蓝牙要让出：WiFi 直接继续。/ There is no Bluetooth to stop: WiFi goes ahead at once.
 esp_err_t ble_pt_network_acquire(void) { return ESP_OK; }
@@ -55,11 +53,7 @@ bool ble_pt_take_passkey(uint32_t *out) { (void)out; return false; }
 
 uint8_t ble_pt_bond_count(void) { return 0; }
 const ble_pt_bond_t *ble_pt_bond(uint8_t index) { (void)index; return NULL; }
-#if KIIKO_BOARD_METALIO47
 esp_err_t ble_pt_forget(const char *addr) { (void)addr; return ESP_ERR_NOT_SUPPORTED; }
-#else
-void ble_pt_forget(const char *addr) { (void)addr; }
-#endif
 
 bool ble_pt_pop_key(ble_pt_event_t *out) { (void)out; return false; }
 bool ble_pt_pop_raw(ble_pt_raw_t *out) { (void)out; return false; }

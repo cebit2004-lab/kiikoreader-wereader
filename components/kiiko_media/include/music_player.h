@@ -80,9 +80,12 @@ void music_stop(void);
 void music_set_volume(int volume);
 void music_cycle_mode(void);
 void music_get_status(music_status_t *out);
-/// 播放、缓冲或暂停中（占用音频与网络）。/ Playing, buffering or paused (holding audio and network).
+/// 播放、缓冲或暂停中（占用音频）。/ Playing, buffering or paused (holding audio).
 bool music_active(void);
-/// 播放中或正在拉列表（需要网络）。/ Playing or loading a list (needs the network).
+/// 正在播放或缓冲（暂停不算），用来决定能否自动锁屏。暂停 10 分钟后自动停止。
+/// Playing or buffering (not paused); decides whether auto-lock may run. A pause stops after 10 minutes.
+bool music_playing(void);
+/// 播放、拉列表或联网任务还在（需要网络）；暂停本身不算。/ Playing, loading a list or the network task alive (needs the network); a pause alone does not count.
 bool music_net_busy(void);
 
 #ifdef __cplusplus

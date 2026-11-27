@@ -35,6 +35,7 @@ code=r'''
 #define UI_TOUCH_SLOP_PX 24
 #define UI_GRAY_WHITE 255
 #define UI_GRAY_BLACK 0
+#define UI_GRAY_LIGHT 0x90
 #define MALLOC_CAP_SPIRAM 1
 #define MALLOC_CAP_8BIT 2
 typedef struct {int x,y,width,height;} EpdRect;
@@ -78,6 +79,7 @@ static int texts;
 static __attribute__((unused)) void ui_text_fixed(uint8_t *fb,int x,int y,int size,const char *text,int align,bool bold){++texts;(void)bold;int width=(int)strlen(text)*size/3;if(align==EPD_DRAW_ALIGN_RIGHT)x-=width;epd_fill_rect((EpdRect){x,y-size,width,size},0,fb);}
 static void ui_nav_status(uint8_t *fb){epd_fill_rect((EpdRect){36,29,52,16},0,fb);}
 static bool app_settings_main_fast_refresh(void){return fast;}
+static bool app_settings_ble_available(void){return true;}
 static void *heap_caps_malloc(size_t n,unsigned caps){assert(caps==3&&n<=300000);++allocs;if((int)n>max_bytes)max_bytes=(int)n;if(oom||fail_after==0)return NULL;if(fail_after>0)--fail_after;++live;size_t *p=malloc(n+sizeof(size_t));assert(p);*p=n;live_bytes+=n;if(live_bytes>peak_bytes)peak_bytes=live_bytes;return p+1;}
 static void heap_caps_free(void *p){if(p){--live;size_t *base=(size_t*)p-1;live_bytes-=*base;free(base);}assert(live>=0);}
 '''

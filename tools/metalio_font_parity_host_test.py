@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-Kiikoread-Personal-Study-1.0
-"""中文：S31/Pico补字逐字节相同、全部旧UI像素不变，以及真实启动画布检查。
-English: S31/Pico supplement identity, unchanged legacy UI pixels and the actual startup canvas check.
+"""中文：S31 补字全部旧 UI 像素不变，以及真实启动画布检查。
+English: Unchanged legacy UI pixels of the S31 supplement and the actual startup canvas check.
 """
 from pathlib import Path
 import hashlib,json,struct,subprocess,tempfile,zlib
@@ -9,9 +9,8 @@ from font_hanzi_host_support import font_codepoints
 from home_cover_cache_host_test import function
 R=Path(__file__).resolve().parents[1]
 marker=R/'.kiiko-source-view.json';source=Path(json.loads(marker.read_text())['source']) if marker.exists() else R
-pico=source/'boards/pico/src/main/assets';s31=source/'boards/metalio47/src/main/assets'
+s31=source/'boards/metalio47/src/main/assets'
 aa=(s31/'ui-hanzi.bin').read_bytes();native=(s31/'builtin.ttf').read_bytes()
-assert aa==(pico/'ui-hanzi.bin').read_bytes() and native==(pico/'builtin.ttf').read_bytes()
 magic,count,px,block=struct.unpack_from('<4sIII',aa);assert (magic,count,px,block)==(b'PIF4',6030,24,32)
 chars=struct.unpack_from('<'+'H'*count,aa,16);at=16+count*2
 index=struct.unpack_from('<'+'I'*((count+31)//32+1),aa,at);at+=len(index)*4
@@ -26,8 +25,6 @@ for n in range(len(index)-1):
 assert hashlib.sha256(mono).hexdigest()=='c9ab41911c03df18540b84ed6aee9121022f59f758d3b5ae3b288005218c97b3'
 covered=font_codepoints(native)|set(chars);assert len(covered)==7698  # 含背单词用的 30 个音标 / includes 30 IPA glyphs for vocab
 common={int(line.split('#',1)[0].strip(),16) for line in (source/'tools/fixtures/reader-common-6500.txt').read_text().splitlines() if line.split('#',1)[0].strip()};assert common<=covered
-for name in ['reader_missing_advance','ttf_text_left_bearing_px']:
- assert function(name,source/'main/font/ttf_font.c')==function(name,source/'boards/pico/src/main/font/ttf_font.c'),name
 cmake=(source/'main/CMakeLists.txt').read_text().split('\nelse()',1)[0];assert '"assets/lock_4bpp.bin"' not in cmake
 boot=source/'boards/metalio47/src/main/app_main.c';assert '_binary_lock_4bpp' not in boot.read_text()
 unit=r'''

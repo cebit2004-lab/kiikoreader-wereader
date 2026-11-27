@@ -62,6 +62,11 @@ uint32_t metalio_audio_tx_underflows(void);
 /// 128 are kept and older ones return false.
 bool metalio_audio_tx_underflow_at(uint32_t index, uint32_t *us);
 
+/// 读写可与关闭/重开并发：关闭先挡住新的读写，再等正在进行的那块（最多等调用方给的 wait）结束，之后
+/// 读写返回 <0 或已完成的部分。I2S 没有归属：调用方之间要自己约定谁能关。
+/// Read and write may run concurrently with close/reopen: close turns new I/O away and waits for the
+/// chunk in progress (at most the caller's wait); I/O then returns <0 or what was done so far. I2S
+/// has no owner: callers must agree among themselves who may close it.
 /// 播放单声道 16 位样本，返回写入样本数（<0 出错）。会自动打开功放。
 /// Play mono 16-bit samples; returns samples written (<0 on error). Turns the amplifier on.
 int metalio_audio_write(const int16_t *mono, size_t samples, TickType_t wait);

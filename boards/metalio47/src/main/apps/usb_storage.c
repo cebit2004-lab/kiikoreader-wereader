@@ -112,9 +112,17 @@ esp_err_t usb_storage_start(void) {
     // 音乐正从卡上读文件：先停播放并释放音频，电脑接管前本机不能再碰卡。
     // Music reads from the card: stop it and release audio before the host takes the card over.
     if (music_active()) music_stop();
-    if (ai_active()) {
+    // AI：结束对话并收回预热（AI 页开着时也收），再等它把 WiFi、I2S 和旧连接都放掉：ai_active() 在停 WiFi
+    // 之前就变假，只等它的话 U 盘会和停 WiFi 抢内部 DMA。最多等 5 秒，之后照旧继续。
+    // AI: end the chat and drop the warm-up (even with the AI page open), then wait until WiFi, I2S and
+    // the old connection are all released: ai_active() turns false before WiFi stops, and waiting on it
+    // alone let USB compete with the WiFi stop for internal DMA. Wait 5 s at most, then carry on as before.
+    if (!ai_fully_released()) {
+        ai_page_open(false);
         ai_stop();
-        for (int i = 0; i < 150 && ai_active(); ++i) vTaskDelay(pdMS_TO_TICKS(20));
+        int i = 0;
+        for (; i < 250 && !ai_fully_released(); ++i) vTaskDelay(pdMS_TO_TICKS(20));
+        if (!ai_fully_released()) ESP_LOGW(TAG, "USB start: AI still releasing after %d ms", i * 20);
     }
     ESP_LOGI(TAG, "USB start: internal DMA free=%u largest=%u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),

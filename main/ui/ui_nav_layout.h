@@ -4,10 +4,8 @@
  */
 #pragma once
 enum { UI_TAB_HOME, UI_TAB_BOOKS,
-#if KIIKO_BOARD_METALIO47
     UI_TAB_WEREAD,
     UI_TAB_APPS,
-#endif
     UI_TAB_FILES, UI_TAB_SETTINGS, UI_TAB_COUNT };
 #define UI_NAV_TOP 1096
 // 只扩大触控热区，不移动图标或改变内容/底栏的刷新边界。

@@ -31,6 +31,17 @@ const app_desc_t app_book = {.title="book"};
 bool app_book_volume_key(app_ctx_t *ctx,int direction,app_redraw_t *redraw){(void)ctx;(void)direction;(void)redraw;return false;}
 
 const app_desc_t app_transfer = {.title="transfer"};
+// 中文：AI 与音乐的替身：测试里都空闲。/ English: AI and music stand-ins, idle throughout the test.
+const app_desc_t app_ai = {.title="ai"};
+const app_desc_t *g_apps_origin;
+bool ai_active(void){return false;}
+bool ai_audio_busy(void){return false;}
+bool ai_net_busy(void){return false;}
+bool ai_warm_held(void){return false;}
+void ai_start(void){}
+void ai_toggle(void){}
+bool music_playing(void){return false;}
+bool app_settings_ble_available(void){return true;}  // 测试覆盖有蓝牙的固件 / the test covers firmware with Bluetooth
 static int power_open_draws, power_controls_draws, power_final_draws;
 static int power_trigger_step = -1, power_tap_step=-1, shutdowns, restarts;
 static bool staged_shutdown;
@@ -598,12 +609,12 @@ int main(void) {
     reset();media_test=sd_font=saved_sd_font=true;mounted_steps[0]=mounted_steps[2]=true;time_step=4000000;first.on_media_lost=lost;
     add(0,0,0,0);add(0,0,0,0);add(0,0,0,0);add(0,0,0,0);run();
     assert(media_lost==2&&builtin_opens==2&&!probes&&font_opens==1);
-    reset();idle_minutes=1;time_step=60000000;first.on_before_lock=before_lock;
+    reset();idle_minutes=1;time_step=90000000;first.on_before_lock=before_lock; /* Metalio47：最短一档是 90 秒。/ Metalio47: the shortest option lasts 90 s. */
     add(0,0,0,0);add(0,0,0,0);run();
     assert(idle_locks==1&&before_locks==1&&wake_clean_requests==1); // Real scheduler flushes before automatic lock.
-    reset();idle_minutes=1;time_step=60000000;shake_activity=true;
+    reset();idle_minutes=1;time_step=90000000;shake_activity=true;
     add(0,0,0,0);run();assert(!idle_locks);
-    reset();idle_minutes=1;time_step=60000000;shake_activity=true;
+    reset();idle_minutes=1;time_step=90000000;shake_activity=true;
     add(0,0,0,0);add(0,0,0,0);run();assert(idle_locks==1&&wake_clean_requests==1); /* Activity is consumed once, not latched. */
     reset();idle_minutes=0;time_step=600000000;
     add(0,0,0,0);add(0,0,0,0);run();assert(!idle_locks);
@@ -772,7 +783,7 @@ int main(void) {
         assert(lock_badges==1&&lock_feedback_calls==1&&before_locks==1&&idle_locks==1);
         reset();feedback_enabled=true;first.on_power_short=consume_power;lock_due=true;time_step=3000000;
         add(0,0,0,0);add(0,0,0,0);run();assert(!lock_badges&&!lock_feedback_calls&&!before_locks&&!idle_locks);
-        reset();feedback_enabled=true;idle_minutes=1;time_step=60000000;first.on_before_lock=before_lock;
+        reset();feedback_enabled=true;idle_minutes=1;time_step=90000000;first.on_before_lock=before_lock;
         add(0,0,0,0);add(0,0,0,0);run();assert(idle_locks==1&&before_locks==1&&!lock_feedback_calls&&!lock_badges);
     }
     puts("PASS: manual lock acknowledgement precedes page save/reader joins in all three modes; consumed power turns and auto sleep omit the badge");
@@ -872,7 +883,7 @@ int main(void) {
         main_source_visible=false;first.on_gesture=tap_return_to_root;
         main_fast=policy==1;main_water=policy==2;
         add(60,110,1,0);add(0,0,0,0);run();
-        assert(!back_ripples&&binary_outputs==1&&!binary_scope&&!navigation_scope);
+        assert(!back_ripples&&binary_outputs==0&&mode==1&&!binary_scope&&!navigation_scope);
     }
     for(int policy=0;policy<3;++policy){
         reset();enable_main_tabs();second.binary_ui=true;second.grayscale_ui=gray_list_ui;

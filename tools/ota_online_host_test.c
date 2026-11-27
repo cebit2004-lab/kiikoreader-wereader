@@ -9,17 +9,10 @@
 #include <pthread.h>
 #include <sched.h>
 #include "../main/ota_online.c"
-#if KIIKO_BOARD_METALIO47
 #define TEST_SLOT_SIZE 0x600000
 #define TEST_SLOT_1 0x610000
 #define TEST_OTA_DATA 0xd000
 #define TEST_CHIP_ID 32
-#else
-#define TEST_SLOT_SIZE 0x400000
-#define TEST_SLOT_1 0x910000
-#define TEST_OTA_DATA 0xd10000
-#define TEST_CHIP_ID 9
-#endif
 static const esp_partition_t running={0x10000,TEST_SLOT_SIZE},inactive={TEST_SLOT_1,TEST_SLOT_SIZE},metadata={TEST_OTA_DATA,0x2000};
 static const esp_app_desc_t current={.version="0.3.3-rc78",.project_name=PICO_OTA_PROJECT};
 static uint8_t firmware[4096],written[4096];static char feed[1600];
@@ -40,12 +33,10 @@ static size_t internal_free=131072,internal_block=65536,external_free=1048576,ex
 static size_t failed_allocation;
 static pthread_mutex_t flash_display_mutex;
 static _Thread_local unsigned lock_depth;
-#if KIIKO_BOARD_METALIO47
 static pthread_once_t sdk_lock_once = PTHREAD_ONCE_INIT;
 static void sdk_lock_init(void) {(void)xSemaphoreCreateRecursiveMutex();}
 void spi_flash_op_lock(void) {assert(!pthread_once(&sdk_lock_once,sdk_lock_init));assert(xSemaphoreTakeRecursive((void*)3,portMAX_DELAY));}
 void spi_flash_op_unlock(void) {assert(xSemaphoreGiveRecursive((void*)3));}
-#endif
 static atomic_bool display_active;
 static void assert_flash_locked(void) {assert(lock_depth && !atomic_load(&display_active));}
 
@@ -115,19 +106,12 @@ static void *display_thread(void *arg){(void)arg;for(unsigned i=0;i<1000;++i){
 }return NULL;}
 static void *flash_thread(void *arg){(void)arg;for(unsigned i=0;i<1000;++i){assert(flash_write(7,firmware,0)==ESP_OK);assert(!lock_depth);}return NULL;}
 int main(void){
-#if KIIKO_BOARD_METALIO47
  assert(!strcmp(PICO_OTA_FEED_URL,"https://wegooo-cell.github.io/read-pico-reader/metalio-s31-update.json"));
  assert(!strcmp(PICO_OTA_FEED_FALLBACK_URL,"https://kiikoread.com/metalio-s31-update.json"));
  bool early=pico_online_display_begin();assert(early&&lock_depth==1);pico_online_display_end(early);
-#else
- assert(!strcmp(PICO_OTA_FEED_URL,"https://wegooo-cell.github.io/read-pico-reader/update.json"));
- assert(!strcmp(PICO_OTA_FEED_FALLBACK_URL,"https://kiikoread.com/update.json"));
-#endif
  _Static_assert(sizeof(esp_image_header_t)==24&&sizeof(esp_app_desc_t)==256,"real header sizes");
  fixture();primary_down=true;wifi_ps=WIFI_PS_MIN_MODEM;assert(pico_online_check()==ESP_OK);run();assert(s_status->state==PICO_UPDATE_AVAILABLE&&primary_feeds==2&&fallback_feeds==1);primary_down=false;
-#if KIIKO_BOARD_METALIO47
  fixture();primary_app_down=true;check_download();assert(s_status->state==PICO_UPDATE_READY&&primary_apps&&fallback_apps&&!boot_calls);primary_app_down=false;
-#endif
  fixture();again=true;check_download();assert(s_status->state==PICO_UPDATE_READY&&written_size==4096&&!memcmp(firmware,written,4096)&&!boot_calls);assert(pico_online_commit()==ESP_OK&&boot_calls==1);
  fixture();limit=1024;check_download();assert(s_status->state==PICO_UPDATE_FAILED&&abort_calls==1&&!boot_calls&&range_requests==3);assert(pico_online_commit()!=ESP_OK);range_requests=0;
  fixture();drop_at=100;drops=1;check_download();assert(s_status->state==PICO_UPDATE_READY&&written_size==4096&&!memcmp(firmware,written,4096)&&begin_calls==1&&range_requests==1);range_requests=0;

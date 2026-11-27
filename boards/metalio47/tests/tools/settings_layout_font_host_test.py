@@ -93,6 +93,7 @@ static void profile_editor_open(bool signature){assert(signature);++profile_edit
 static bool fast_charge=true;
 static unsigned fast_charge_writes,charger_applies;
 static bool app_settings_fast_charge(void){return fast_charge;}
+static bool app_settings_ble_available(void){return true;}
 static void app_settings_set_fast_charge(bool v){fast_charge=v;++fast_charge_writes;}
 static int metalio_charger_set_fast_charge(bool v){(void)v;++charger_applies;return 0;}
 #define UI_NAV_TOP 1096

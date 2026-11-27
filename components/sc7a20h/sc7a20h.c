@@ -237,7 +237,6 @@ esp_err_t sc7a20h_power_up(sc7a20h_handle_t h) {
     return sc7a20h_apply_config(h, &h->cfg);
 }
 // S31共享中断脚只轮询，Pico保留自身路径。/ Poll S31 shared IRQ; Pico retains its own path.
-#if KIIKO_BOARD_METALIO47
 
 esp_err_t sc7a20h_shared_irq_polling(sc7a20h_handle_t h) {
     if (h == NULL || h->dev == NULL) return ESP_ERR_INVALID_STATE;
@@ -270,7 +269,6 @@ esp_err_t sc7a20h_shared_irq_idle(sc7a20h_handle_t h) {
     if (err==ESP_OK) h->powered=false;
     return err;
 }
-#endif
 
 bool sc7a20h_powered(sc7a20h_handle_t h) {
     return h != NULL && h->powered;

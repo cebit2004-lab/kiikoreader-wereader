@@ -152,7 +152,6 @@
  * 用户2026-11-07新增可选强制四边等距：开启按当前可用正文区重排并锚定文字；关闭保留原浮层逻辑。
  * User2026-11-07 adds optional equal insets: reflow to the current reader area at the text anchor when enabled; retain original overlays when off.
  */
-#if KIIKO_BOARD_METALIO47
 #ifdef ESP_PLATFORM
 #include "esp_attr.h"
 #include "ui_locale_format.h"
@@ -161,7 +160,6 @@
 #include "ui_root_style.h"
 #include "ui_book_manage_layout.h"
 #include "metalio_hw.h"
-#endif
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
@@ -182,12 +180,9 @@ extern const app_desc_t app_device_settings;
 #include "ble_page_turner.h"
 #include "book_layout.h"
 #include "book_cover.h"
-#if KIIKO_BOARD_METALIO47
 #include "metalio_cover_cache.h"
 #include "reader_page_cache.h"
 #include "esp_rom_crc.h"
-#else
-#endif
 #include "book_chapter_cache.h"
 #include "book_cover_jobs.h"
 #include "book_shelf_page_cache.h"
@@ -220,11 +215,9 @@ extern const app_desc_t app_device_settings;
 #include "freertos/task.h"
 #include "read_pico_init.h"
 #include "read_pico_sd.h"
-#if KIIKO_BOARD_METALIO47
 #include "app_weread.h"
 #include "weread.h"
 #include "weread_cache.h"
-#endif
 #include "read_pico_transfer.h"
 #include "read_pico_search.h"
 #include "settings.h"
@@ -272,8 +265,6 @@ typedef enum {
     READER_PANEL_WEIGHT_SETTINGS,
     READER_PANEL_RULE_SETTINGS,
     READER_PANEL_FONT_PICKER,
-#if KIIKO_BOARD_METALIO47
-#endif
     READER_PANEL_BACKGROUND,
     READER_PANEL_BACKGROUND_PREVIEW,
     READER_PANEL_STATS,
@@ -344,19 +335,15 @@ static bool s_reader_turn_pending;
 // 只记录成功推屏的纯正文基准，避免跨章或退出插图时误用文字波形。
 // Track only successfully presented text-only bodies, protecting chapter and image transitions.
 static bool s_reader_text_frame;
-#if KIIKO_BOARD_METALIO47
 // 旧图资格以成功显示的画面为准，跨章释放图片表后仍能清除旧插图。
 // Retain successfully displayed image history across chapter image-table replacement.
 static bool s_reader_image_frame, s_reader_image_exit_pending;
-#endif
 static char s_requested_open[BOOK_STORE_PATH_MAX];
 static bool s_requested_open_home;
 static bool s_requested_fullscreen = false;
 static bool s_requested_resume_mode;
 static bool s_reader_return_home;
-#if KIIKO_BOARD_METALIO47
 static bool s_reader_return_weread, s_open_from_home;
-#endif
 static bool s_requested_manage;
 static shelf_entry_t* s_shelf;
 static struct {
@@ -373,10 +360,7 @@ static struct {
 static unsigned s_cover_pending_mask, s_cover_decode_mask, s_cover_warm_mask;
 static unsigned s_cover_dirty_mask, s_cover_present_mask;
 static int64_t s_cover_warm_after_ms;
-#if KIIKO_BOARD_METALIO47
 
-#else
-#endif
 static size_t s_shelf_capacity;
 static int s_count, s_visible_count, s_filter;
 static bool s_recent_sort;
@@ -517,7 +501,6 @@ static bool s_book_fonts_pending_value;
 // S31 accumulates manual/runtime episodes per open book; recovery followed by fallback is a new episode.
 static unsigned s_font_fallbacks;
 static bool s_font_choice_pending, s_font_recovery_pending, s_font_restart_pending;
-#if KIIKO_BOARD_METALIO47
 static bool s_font_runtime_fallback_seen;
 typedef struct {
     char path[TTF_FONT_PATH_MAX];
@@ -545,7 +528,6 @@ static void reader_font_reload_cancel(void) {
     s_font_choice_pending = false;
 }
 
-#endif
 
 static bool s_font_recovery_save_failed;
 static void reader_font_choice_begin(const char *path) {
@@ -555,28 +537,18 @@ static void reader_font_choice_begin(const char *path) {
     } else s_font_choice_pending = true;
 }
 static void reader_font_choice_finish(void) {
-#if KIIKO_BOARD_METALIO47
     if (s_font_job) return;
-#endif
     if (!s_font_choice_pending) return;
     s_font_choice_pending = false;
     if (ttf_font_is_builtin()) {
         if (s_font_fallbacks < 3) ++s_font_fallbacks;
         if (s_font_fallbacks == 3) s_font_recovery_pending = true;
-#if KIIKO_BOARD_METALIO47
         s_font_runtime_fallback_seen=true;
-#endif
     } else if (ttf_font_ready())
-#if KIIKO_BOARD_METALIO47
         s_font_runtime_fallback_seen=false;
-#else
-        s_font_fallbacks = 0;
-#endif
 }
 static void reader_font_recovery_reset(void) {
-#if KIIKO_BOARD_METALIO47
     s_font_runtime_fallback_seen=false;
-#endif
     s_font_fallbacks = 0;
     s_font_choice_pending = s_font_recovery_pending = s_font_restart_pending = false;
     s_font_recovery_save_failed = false;
@@ -691,13 +663,10 @@ static book_layout_draw_cursor_t s_prep_cursor;
 static uint32_t s_next_generation;
 static uint8_t* s_next_fb;
 static int s_next_page = -1, s_prep_page = -1;
-#if KIIKO_BOARD_METALIO47
 static size_t s_chapter_warm_target=SIZE_MAX;
 static bool s_chapter_warm_done;
 static int64_t s_chapter_warm_retry;
 static int s_turn_direction=1;
-#else
-#endif
 
 #define s_toolbar (s_reader_panel != READER_PANEL_NONE)
 
@@ -784,7 +753,6 @@ static EpdRect reader_area(void) { return ui_reader_area(s_reader_fullscreen,app
 // 页首插图与脚注固定在内容顶部，不随可见刷新裁剪下移。
 // Page-start images and notes stay at the layout top, independently of the visible refresh crop.
 static int reader_image_top(void) { return ui_reader_area(true,app_settings_reader_immersive()).y; }
-static EpdRect reader_fullscreen_progress_area(void) { return ui_reader_fullscreen_footer(); }
 static EpdRect body_rect_for_tracking(int tracking_index) {
     (void)tracking_index;
     return ui_reader_body(s_reader_fullscreen,app_settings_reader_immersive(),s_margin,app_settings_book_vertical());
@@ -918,10 +886,8 @@ static unsigned s_chapters_pending;static bool s_chapters_started,s_chapters_cha
 static int s_prefetch_step,s_prefetch_index;static bool s_prefetch_active;static int64_t s_prefetch_after;
 static book_shelf_page_key_t s_shelf_page_base;
 static bool s_shelf_page_key_valid,s_shelf_page_loading,s_shelf_page_cached,s_shelf_page_cache_allowed;
-#if KIIKO_BOARD_METALIO47
 static bool s_ticket_cover_started,s_ticket_cover_done;
 static bool s_shelf_cover_hint_dirty;
-#endif
 static void invalidate_covers(void) {
     book_shelf_page_pause();
     s_chapters_pending=0;s_chapters_started=s_chapters_changed=false;
@@ -931,10 +897,7 @@ static void invalidate_covers(void) {
     release_guard_cache();
     s_cover_pending_mask = s_cover_decode_mask = s_cover_warm_mask = 0;
     s_cover_dirty_mask = s_cover_present_mask = 0;
-#if KIIKO_BOARD_METALIO47
 
-#else
-#endif
     for (int i = 0; i < BOOK_ROWS; ++i) {
         free(s_covers[i].gray);
         free(s_covers[i].fast_bits);
@@ -994,11 +957,7 @@ static void prepare_fast_covers(void) {
         free(s_covers[row].gray); s_covers[row].gray = NULL;
     }
 }
-#if KIIKO_BOARD_METALIO47
 void app_book_cover_mode_changed(void) { metalio_cover_cache_clear(); invalidate_covers(); }
-#else
-void app_book_cover_mode_changed(void) { invalidate_covers(); }
-#endif
 static uint8_t* load_cover_gray(const char* source, const char* title, const char* author,
                                 bool decode, bool* pending) {
     *pending = false;
@@ -1048,14 +1007,6 @@ static bool load_shelf_cover_fast(int row, int index) {
     s_covers[row].fast_bits = bits; s_covers[row].fast_white_edge = edge;
     s_covers[row].fast_contrast = key.contrast; s_covers[row].fast_phase = key.phase;
     return true;
-}
-static void save_shelf_cover_fast(int row, int index) {
-    if (!s_covers[row].fast_bits) return;
-    EpdRect image = shelf_cover_image(row);
-    book_fast_cover_key_t key = {(unsigned)image.width, (unsigned)image.height, SHELF_FAST_COVER_STRIDE,
-        s_covers[row].fast_contrast, s_covers[row].fast_phase};
-    book_cover_fast_cache_write(s_shelf[index].path, s_shelf[index].name, s_shelf[index].author,
-                                key, s_covers[row].fast_bits, s_covers[row].fast_white_edge);
 }
 
 
@@ -1212,7 +1163,6 @@ static void shelf_loading_hint_update(int done, int total) {
     snprintf(s_message, sizeof(s_message), "正在加载书架 %d/%d", done, total);
 }
 
-#if KIIKO_BOARD_METALIO47
 static void update_shelf_cover_hint(app_ctx_t *ctx) {
     const bool active = shelf_loading_hint_active();
     if (s_scan_pending || (s_message[0] && !active)) return;
@@ -1226,7 +1176,6 @@ static void update_shelf_cover_hint(app_ctx_t *ctx) {
     copy_text(s_message, sizeof(s_message), hint);
     s_shelf_cover_hint_dirty = true;
 }
-#endif
 
 static void prepare_covers(app_ctx_t* ctx) {
     if(s_view!=SHELF&&s_shelf_page_key_valid)invalidate_covers();
@@ -1418,7 +1367,6 @@ static void warm_shelf_lock_cover(app_ctx_t *ctx) {
     }
 }
 
-#if KIIKO_BOARD_METALIO47
 // Reuse the bounded shelf worker and its existing disk/LRU cache. Never unzip or
 // decode on the power-key path, nor touch font state from the background task.
 static void warm_reader_ticket_cover(app_ctx_t *ctx) {
@@ -1453,46 +1401,9 @@ static void warm_reader_ticket_cover(app_ctx_t *ctx) {
         s_ticket_cover_done=true;
     }
 }
-#endif
 
 #include "apps/book_shelf_badges.inc"
 
-static void draw_favorite_icon(uint8_t *fb, int x, int y, int w, int h, bool filled, uint8_t ink) {
-    // 只绘制标记本身，封面上不加矩形衬底。/ Draw only the glyph, without a rectangular cover underlay.
-    const int notch_y = y + h - 9;
-    if (filled) {
-        // 把 V 形尾部也填满，避免选中后只剩矩形黑块、尾部仍是空心。
-        // Fill the V-shaped tail as well so the selected glyph is solid throughout.
-        for (int py = y; py <= y + h; ++py) {
-            int arm = py <= notch_y ? w / 2 : (w / 2) * (y + h - py) / 9;
-            ui_fill_rect_fast((EpdRect){x, py, arm + 1, 1}, ink, fb);
-            ui_fill_rect_fast((EpdRect){x + w - arm, py, arm + 1, 1}, ink, fb);
-        }
-        return;
-    }
-    // 空心态使用与阅读工具栏相近的两像素线宽。
-    // Keep the outline close to the other reader toolbar icons in visual weight.
-    ui_fill_rect_fast((EpdRect){x, y, w + 1, 2}, ink, fb);
-    ui_fill_rect_fast((EpdRect){x, y, 2, h - 1}, ink, fb);
-    ui_fill_rect_fast((EpdRect){x + w - 1, y, 2, h - 1}, ink, fb);
-    epd_draw_line(x, y + h, x + w / 2, notch_y, ink, fb);
-    epd_draw_line(x + 1, y + h - 1, x + w / 2, notch_y + 1, ink, fb);
-    epd_draw_line(x + w / 2, notch_y, x + w, y + h, ink, fb);
-    epd_draw_line(x + w / 2, notch_y + 1, x + w - 1, y + h - 1, ink, fb);
-}
-static void draw_shelf_favorite_icon(uint8_t *fb, int x, int y, int w, int h, bool white_edge) {
-    if (white_edge) {
-        // 仅沿书签轮廓扩两像素白边，深封面上也不出现白色矩形底块。
-        // Dilate only the bookmark silhouette by two pixels, never a white backing box.
-        const int notch_y = y + h - 9;
-        for (int py = y; py <= y + h; ++py) {
-            int arm = py <= notch_y ? w / 2 : (w / 2) * (y + h - py) / 9;
-            ui_fill_rect_fast((EpdRect){x - 2, py - 2, arm + 5, 5}, UI_GRAY_WHITE, fb);
-            ui_fill_rect_fast((EpdRect){x + w - arm - 2, py - 2, arm + 5, 5}, UI_GRAY_WHITE, fb);
-        }
-    }
-    draw_favorite_icon(fb, x, y, w, h, true, UI_GRAY_BLACK);
-}
 static bool cover_favorite_needs_white_edge(const uint8_t *gray, EpdRect image, unsigned sw, unsigned sh) {
     if (!gray || !sw || !sh || image.width <= 0 || image.height <= 0) return false;
     unsigned sum = 0, count = 0;
@@ -1514,9 +1425,6 @@ static bool cover_favorite_needs_white_edge(const uint8_t *gray, EpdRect image, 
 static bool shelf_cover_white_edge(int row,EpdRect image) {
     if(s_view==SHELF&&s_shelf_page_cached)return (book_shelf_page_favorite_edges()&(1u<<row))!=0;
     return
-#if !KIIKO_BOARD_METALIO47
-        shelf_cover_frame_ready() &&
-#endif
         ((app_settings_main_fast_refresh()&&s_view==SHELF&&fast_cover_matches(row,image))
         ?s_covers[row].fast_white_edge:cover_favorite_needs_white_edge(s_covers[row].gray,image,
             shelf_display_style()==5?s_covers[row].width:BOOK_COVER_W,
@@ -1568,7 +1476,6 @@ static void draw_shelf_cover(uint8_t* fb, EpdRect card, int row, const char* nam
         unsigned sw = s_view == SHELF && shelf_display_style() == 5 ? s_covers[row].width : BOOK_COVER_W;
         unsigned sh = s_view == SHELF && shelf_display_style() == 5 ? s_covers[row].height : BOOK_COVER_H;
         const book_crop_t crop = book_cover_crop(sw, sh, frame_width, frame_height);
-#if KIIKO_BOARD_METALIO47
         EpdRect physical=ui_rotate_rect_to_fb(image);
         bool raster=display_pipeline_enabled()&&s_view==SHELF&&!app_settings_main_fast_refresh()&&
             !(physical.x&1)&&!(physical.width&1)&&physical.x>=0&&physical.y>=0&&
@@ -1584,7 +1491,6 @@ static void draw_shelf_cover(uint8_t* fb, EpdRect card, int row, const char* nam
                 (uint64_t)(unsigned)physical.width<<32|(unsigned)physical.height}};
             if(metalio_cover_cache_get_rows(&raster_key,physical_pixels,epd_width()/2,physical.width/2,physical.height))goto cover_raster_done;
         }
-#endif
         unsigned sample_x[SHELF_FAST_COVER_WIDTH];
         uint8_t tones[256];
         const bool sampled=image.width<=SHELF_FAST_COVER_WIDTH;
@@ -1602,10 +1508,8 @@ static void draw_shelf_cover(uint8_t* fb, EpdRect card, int row, const char* nam
                                    : ui_image_dither_gray(tone, image.x + x, image.y + y), fb);
             }
         }
-#if KIIKO_BOARD_METALIO47
         if(raster)(void)metalio_cover_cache_put_rows(&raster_key,physical_pixels,epd_width()/2,physical.width/2,physical.height);
 cover_raster_done:;
-#endif
     } else {
         char title[80]; copy_text(title, sizeof(title), name);
         char *dot = strrchr(title, '.'); if (dot) *dot = 0;
@@ -1714,12 +1618,10 @@ static void draw_shelf_rails(uint8_t* fb, unsigned style, int first_top, bool sh
 static void draw_shelf_furniture(uint8_t* fb) {
     draw_shelf_rails(fb,shelf_display_style(),s_view==SHELF?192:224,true);
 }
-#if KIIKO_BOARD_METALIO47
 int app_book_shelf_slots(void) { return shelf_style_slots(app_settings_shelf_style()); }
 EpdRect app_book_shelf_slot(int row) { return shelf_slot_rect(row,app_settings_shelf_style(),192); }
 EpdRect app_book_shelf_cover(int row) { return shelf_slot_cover(app_book_shelf_slot(row),app_settings_shelf_style()==5); }
 void app_book_shelf_furniture(uint8_t *fb) { draw_shelf_rails(fb,app_settings_shelf_style(),192,false); }
-#endif
 static EpdRect tool_rect(int i) {
     int x0 = i * UI_LOCK_WIDTH / BOOK_TOOL_COUNT;
     int x1 = (i + 1) * UI_LOCK_WIDTH / BOOK_TOOL_COUNT;
@@ -1754,13 +1656,8 @@ static EpdRect shelf_search_rect(int page,int pages) {
 // 静态整页与实时信息分层；不在绘图中读写文件。/ Split static artwork and live information; no file IO while painting.
 static void draw_shelf_page_artwork(app_ctx_t *ctx,uint8_t *fb) {
     s_shelf_read_ready=false;
-#if KIIKO_BOARD_METALIO47
     // Show indexed titles and ready covers while card verification or decoding runs.
     const bool loading = s_scan_pending && !s_visible_count;
-#else
-    const bool loading = s_scan_pending || s_shelf_page_loading ||
-                         (s_visible_count && !shelf_cover_frame_ready());
-#endif
     if (loading) {
         ui_text_fixed_vc(fb,342,610,30,"正在加载书架...",EPD_DRAW_ALIGN_CENTER,false);return;
     }
@@ -1811,12 +1708,10 @@ static void draw_shelf_header_button(uint8_t *fb,EpdRect r,bool sorting) {
     if(sorting){draw_shelf_order_button(fb,r,115);return;}
     paint_shelf_header(fb,r,s_pressed_control==114,20,"管理");
 }
-#if KIIKO_BOARD_METALIO47
 EpdRect app_book_shelf_action_rect(bool second) { return second?shelf_sort_rect():shelf_manage_rect(); }
 void app_book_shelf_header(uint8_t *fb, bool second, const char *label, bool pressed) {
     paint_shelf_header(fb,app_book_shelf_action_rect(second),pressed,second?24:20,label);
 }
-#endif
 // 图标和搜索文字共用点击区；无外框，按下下沉，筛选激活时以细下划线提示。
 // Share the icon/text hit area without a frame; inset on press and underline an active query.
 static EpdRect shelf_search_clear_rect(int page,int pages) {
@@ -1891,9 +1786,7 @@ static bool shelf_pager_event(app_ctx_t *ctx, const ui_gesture_event_t *ev, app_
     if (ev->type == UI_GESTURE_PRESS) {
         s_pressed_control = start < 0 ? -1 : 116 + start;
         if (start >= 0) {
-#if KIIKO_BOARD_METALIO47
             (void)metalio_haptic_click();
-#endif
             *redraw = shelf_key_paint(ctx);
         }
         return true;
@@ -2242,16 +2135,6 @@ static void draw_manage(uint8_t* fb) {
     }
 }
 
-static void editor_start(void) {
-    free(s_editor_cover);
-    bool pending = false;
-    s_editor_cover = load_cover_gray(s_managed.path, s_managed.name, "", false, &pending);
-    copy_text(s_editor_title, sizeof(s_editor_title), s_managed.name);
-    ui_text_edit_init(&s_editor_input, s_editor_title, sizeof(s_editor_title));
-    s_editor_notice[0] = 0;
-    ui_keyboard_begin(&s_editor_input, false);
-    s_view = EDIT;
-}
 
 
 
@@ -2418,21 +2301,13 @@ static void save_progress(void) {
     else { if (!s_unsaved) s_unsaved = 1; s_save_failed = true; }
     if (was_failed != s_save_failed) invalidate_prep();
 }
-#if KIIKO_BOARD_METALIO47
 static void invalidate_prep(void) { s_next_page = s_prep_page = -1; s_next_generation=0; s_next_fb=NULL; memset(&s_prep_cursor,0,sizeof(s_prep_cursor)); reader_page_cache_invalidate(); }
-#else
-static void invalidate_prep(void) { s_next_page = s_prep_page = -1; s_next_generation=0; memset(&s_prep_cursor,0,sizeof(s_prep_cursor)); }
-#endif
 
 // 面板开合只暂停未完成的预绘，保留同代次的已完成正文；正文设置改变仍调用invalidate_prep。
 // Panel transitions cancel unfinished work but retain completed same-generation text rasters; body edits still invalidate.
 static void pause_reader_prep(void) {
-#if KIIKO_BOARD_METALIO47
     s_next_page=s_prep_page=-1;s_next_generation=0;s_next_fb=NULL;
     memset(&s_prep_cursor,0,sizeof(s_prep_cursor));reader_page_cache_cancel();
-#else
-    invalidate_prep();
-#endif
 }
 
 // 目录使用系统字体；切换前等待预渲染结束，回正文时恢复阅读字体与字形缓存。
@@ -2489,22 +2364,14 @@ static bool favorite_read_handle(nvs_handle_t h, const char *path) {
 }
 static bool favorite_load(const char *path) {
     nvs_handle_t h;
-#if KIIKO_BOARD_METALIO47
     if (nvs_open("mt_favs", NVS_READONLY, &h) != ESP_OK) return false;
-#else
-    if (nvs_open("rp_favs", NVS_READONLY, &h) != ESP_OK) return false;
-#endif
     bool value = favorite_read_handle(h, path);
     nvs_close(h);
     return value;
 }
 static bool favorite_save(const char *path, bool value) {
     nvs_handle_t h;
-#if KIIKO_BOARD_METALIO47
     if (nvs_open("mt_favs", NVS_READWRITE, &h) != ESP_OK) return false;
-#else
-    if (nvs_open("rp_favs", NVS_READWRITE, &h) != ESP_OK) return false;
-#endif
     char key[11]; favorite_key(path, key);
     esp_err_t err = value ? nvs_set_u8(h, key, 1) : nvs_erase_key(h, key);
     if (err == ESP_ERR_NVS_NOT_FOUND && !value) err = ESP_OK;
@@ -2517,11 +2384,7 @@ static bool favorite_save(const char *path, bool value) {
 // Removing from the shelf hides the entry only: no file or progress is touched, and opening the
 // book again puts it back. 值为完整路径，命中的同键记录属于别的书时拒绝覆盖。
 // The value is the full path, so a colliding key owned by a different book is never overwritten.
-#if KIIKO_BOARD_METALIO47
 #define SHELF_HIDDEN_NS "mt_shelf"
-#else
-#define SHELF_HIDDEN_NS "rp_shelf"
-#endif
 static void shelf_hidden_key(const char *path, char key[11]) {
     uint32_t hash = UINT32_C(2166136261);
     for (const unsigned char *p = (const unsigned char *)path; *p; ++p)
@@ -2593,11 +2456,7 @@ static bool bookmark_read_handle(nvs_handle_t h, reader_bookmarks_t* marks) {
 static bool bookmark_load(reader_bookmarks_t* marks) {
     if (!marks || !s_path[0]) return false;
     nvs_handle_t h;
-#if KIIKO_BOARD_METALIO47
     if (nvs_open("mt_marks", NVS_READONLY, &h) != ESP_OK) return false;
-#else
-    if (nvs_open("rp_marks", NVS_READONLY, &h) != ESP_OK) return false;
-#endif
     bool ok = bookmark_read_handle(h, marks);
     nvs_close(h);
     return ok;
@@ -2642,11 +2501,7 @@ static void bookmark_compact(reader_bookmarks_t* marks, uint32_t selected) {
 static bool bookmark_delete_selected(void) {
     if (!s_bookmark_selected || !s_path[0]) return false;
     nvs_handle_t h;
-#if KIIKO_BOARD_METALIO47
     if (nvs_open("mt_marks", NVS_READWRITE, &h) != ESP_OK) return false;
-#else
-    if (nvs_open("rp_marks", NVS_READWRITE, &h) != ESP_OK) return false;
-#endif
     reader_bookmarks_t marks;
     bool valid = bookmark_read_handle(h, &marks);
     esp_err_t err = valid ? ESP_OK : ESP_ERR_NOT_FOUND;
@@ -2666,11 +2521,7 @@ static bool bookmark_delete_selected(void) {
 static bool bookmark_toggle(void) {
     if (!s_path[0]) return false;
     nvs_handle_t h;
-#if KIIKO_BOARD_METALIO47
     if (nvs_open("mt_marks", NVS_READWRITE, &h) != ESP_OK) return false;
-#else
-    if (nvs_open("rp_marks", NVS_READWRITE, &h) != ESP_OK) return false;
-#endif
     char key[11]; bookmark_key(s_path, key);
     reader_bookmarks_t marks;
     bool valid = bookmark_read_handle(h, &marks);
@@ -2715,9 +2566,7 @@ static bool bookmark_toggle(void) {
     return err == ESP_OK;
 }
 
-#if KIIKO_BOARD_METALIO47
 bool app_book_ai_bookmark(void){rc_pause_auto();return app_book_reader_body_visible() && bookmark_toggle();}
-#endif
 
 static void draw_reader_tool_icon(uint8_t* fb, int cx, int cy, int kind, bool selected) {
     // 阅读工具栏图标全部来自 Lucide；已保存的书签用带勾的一档区分未保存。
@@ -2795,17 +2644,6 @@ static const char* font_friendly_name(const ttf_font_item_t* item) {
     return item ? ttf_font_localized_name(item->name) : "";
 }
 
-#if KIIKO_BOARD_METALIO47
-#else
-static void draw_font_name_with_current_face(uint8_t* fb, int x, int y, const char* name, int width) {
-    int above = 0, below = 0;
-    int px=ui_text_effective_px(25);
-    while (px>1 && ttf_text_width_px(px,name)>width) --px;
-    ttf_measure_line_px(px, name, &above, &below);
-    ttf_draw_text_px(fb, x, y + (above - below) / 2, px, name,
-                     EPD_DRAW_ALIGN_CENTER, UI_INK_BLACK, UI_INK_WHITE);
-}
-#endif
 
 // 用户确认双列：字体/字重在第一行，书内字体/排版在第二行；绘制与命中共用矩形。
 // Approved paired rows: face/weight, then embedded faces/layout; paint and touch share rectangles.
@@ -3226,56 +3064,12 @@ static void draw_layout_settings(uint8_t* fb) {
     reader_panel_text_vc(fb, 342, 1168, 24, "返回字体设置", EPD_DRAW_ALIGN_CENTER, true);
 }
 
-// 按用户要求恢复在线正式版双列和末行整宽按键入口；绘制与命中共用矩形。
-// Restore released paired controls and the full-width final key row, sharing paint/hit geometry.
-static EpdRect reading_setting_rect(int index) {
-    int extra=reader_ui_extra(56), footer=reader_ui_extra(36);
-    if (index < 0 || index >= 9) return (EpdRect){0,0,0,0};
-    int row=index/2;
-    return (EpdRect){index==8?36:36+(index%2)*314,
-        590+row*104-(4-row)*extra-footer,index==8?612:298,98+extra};
-}
 static int reading_settings_top(void){return rc_root_top();}
-static EpdRect reading_toggle_rect(int index) {
-    return reading_setting_rect(index == 0 ? 3 : index == 1 ? 5 : index == 2 ? 6 : index == 3 ? 7 : 4);
-}
 static void draw_reading_switch(uint8_t *fb, EpdRect track, bool on) {
     ui_fill_round_rect(fb, track, 19, on ? 0x38 : 0xc4);
     int cx = track.x + (on ? 49 : 20);
     epd_fill_circle(cx, track.y + 19, 16, UI_GRAY_WHITE, fb);
     epd_draw_circle(cx, track.y + 19, 16, 0x78, fb);
-}
-static void draw_reading_item(uint8_t *fb, EpdRect card, const char *title,
-                              const char *value, bool cycle) {
-    ui_fill_round_rect(fb, card, 20, UI_GRAY_WHITE);
-    ui_draw_control_frame(fb, card, 20, 0x68);
-    ui_text_box(fb,(EpdRect){card.x+21,card.y+6,card.width-42,card.height/2-12},32,title,EPD_DRAW_ALIGN_LEFT,false);
-    char shown[96]; copy_text(shown,sizeof(shown),value);
-    for(char *p=shown;*p;++p)if(*p=='\n')*p=' ';
-    ui_text_box(fb,(EpdRect){card.x+21,card.y+card.height/2,card.width-76,card.height/2-8},17,shown,EPD_DRAW_ALIGN_LEFT,false);
-    ui_draw_icon(fb,card.x+card.width-26,card.y+3*card.height/4,26,
-                 cycle ? UI_ICON_ROTATE_CW : UI_ICON_CHEVRON_RIGHT, 0x38);
-}
-static void draw_reading_card(uint8_t *fb, int index, const char *title,
-                              const char *value, bool cycle) {
-    EpdRect card = reading_setting_rect(index);
-    ui_fill_round_rect(fb, card, 20, UI_GRAY_WHITE);
-    ui_draw_control_frame(fb, card, 20, 0x68);
-    ui_text_box(fb,(EpdRect){card.x+21,card.y+6,card.width-42,card.height/2-12},23,title,EPD_DRAW_ALIGN_LEFT,false);
-    char shown[48]; copy_text(shown,sizeof(shown),value);
-    ui_text_box(fb,(EpdRect){card.x+21,card.y+card.height/2,card.width-76,card.height/2-8},26,shown,EPD_DRAW_ALIGN_LEFT,false);
-    ui_draw_icon(fb,card.x+card.width-26,card.y+3*card.height/4,26,
-                 cycle ? UI_ICON_ROTATE_CW : UI_ICON_CHEVRON_RIGHT, 0x38);
-}
-static void draw_reading_toggle(uint8_t *fb, int index, const char *title,
-                                const char *detail, bool on) {
-    (void)detail;
-    EpdRect row = reading_toggle_rect(index);
-    ui_fill_round_rect(fb,row,20,UI_GRAY_WHITE);
-    ui_draw_control_frame(fb,row,20,0x68);
-    ui_text_box(fb,(EpdRect){row.x+21,row.y+6,row.width-42,row.height/2-12},23,title,EPD_DRAW_ALIGN_LEFT,false);
-    ui_text_box(fb,(EpdRect){row.x+21,row.y+row.height/2,166,row.height/2-8},26,on?"开启":"关闭",EPD_DRAW_ALIGN_LEFT,false);
-    draw_reading_switch(fb,(EpdRect){row.x+209,row.y+3*row.height/4-19,69,39},on);
 }
 static void draw_reading_settings(uint8_t*fb){rc_draw_settings(fb);}
 
@@ -3321,11 +3115,9 @@ static const char *reader_key_label(app_reader_key_action_t action) {
     return labels[action >= 0 && action < APP_READER_KEY_COUNT ? action : APP_READER_KEY_NONE];
 }
 static EpdRect reader_key_card(unsigned key) {
-#if KIIKO_BOARD_METALIO47
     // 物理从左到右是圆圈、左、右；存储仍按左、圆圈、右，保持已有配置。
     // Physical order is circle/left/right; storage stays left/circle/right for saved bindings.
     if (key < 2) key = 1 - key;
-#endif
     return (EpdRect){36 + (int)key * 208, 506, 196, 114};
 }
 static EpdRect reader_key_preset_card(unsigned preset) { return (EpdRect){36, 810 + (int)(preset - 1) * 148, 612, 136}; }
@@ -3340,28 +3132,15 @@ static bool reader_key_preset_selected(unsigned preset) {
 static void draw_key_settings(uint8_t *fb) {
     draw_sheet(fb, 270, "按键控制");
     draw_sheet_back(fb, 270);
-#if KIIKO_BOARD_METALIO47
     static const char *const names[] = {"左键", "圆圈键", "右键"};
-#else
-    static const char *const names[] = {"左键", "中键", "右键"};
-#endif
     for (unsigned i = 0; i < 3; ++i) {
-#if KIIKO_BOARD_METALIO47
         EpdRect card = reader_key_card(i);
         int cx = card.x + card.width / 2;
         if (i == 1u) {
-#else
-        int cx = 134 + (int)i * 208;
-        if (i == (KIIKO_BOARD_METALIO47 ? 0u : 1u)) {
-#endif
             epd_draw_circle(cx, 418, 25, UI_GRAY_BLACK, fb);
             epd_draw_circle(cx, 418, 24, UI_GRAY_BLACK, fb);
         } else ui_fill_round_rect(fb, (EpdRect){cx - 26, 415, 52, 6}, 3, UI_GRAY_BLACK);
         reader_panel_text_vc(fb, cx, 473, 22, names[i], EPD_DRAW_ALIGN_CENTER, false);
-#if KIIKO_BOARD_METALIO47
-#else
-        EpdRect card = reader_key_card(i);
-#endif
         ui_fill_round_rect(fb, card, 20, 0xf0);
         ui_draw_control_frame(fb, card, 20, 0x58);
         ui_text_box(fb,(EpdRect){card.x+17,card.y+7,card.width-57,36},20,"单击",EPD_DRAW_ALIGN_LEFT,false);
@@ -3370,11 +3149,7 @@ static void draw_key_settings(uint8_t *fb) {
     }
     EpdRect hold = {36, 646, 612, 96};
     ui_fill_round_rect(fb, hold, 20, 0xf0); ui_draw_control_frame(fb, hold, 20, 0x58);
-#if KIIKO_BOARD_METALIO47
     ui_text_box(fb,(EpdRect){58,652,238,48},26,"圆圈键长按",EPD_DRAW_ALIGN_LEFT,false);
-#else
-    ui_text_box(fb,(EpdRect){58,652,238,48},26,"中键长按",EPD_DRAW_ALIGN_LEFT,false);
-#endif
     ui_text_box(fb,(EpdRect){322,652,270,48},25,reader_key_label(app_settings_reader_hold_action()),EPD_DRAW_ALIGN_RIGHT,false);
     ui_draw_icon(fb, 625, 679, 20, UI_ICON_CHEVRON_DOWN, 0x38);
     reader_panel_text(fb, 58, 710, 19, "点击选择长按功能，例如返回主页", EPD_DRAW_ALIGN_LEFT, false);
@@ -3388,23 +3163,14 @@ static void draw_key_settings(uint8_t *fb) {
         char title[32]; snprintf(title, sizeof(title), "推荐设置 %u", preset);
         ui_text_box(fb,(EpdRect){58,card.y+7,344,49},26,title,EPD_DRAW_ALIGN_LEFT,false);
         ui_text_box(fb,(EpdRect){435,card.y+7,186,49},20,selected?"已应用":"点击应用",EPD_DRAW_ALIGN_RIGHT,false);
-#if KIIKO_BOARD_METALIO47
         ui_text_box(fb,(EpdRect){58,card.y+59,564,40},21,preset==1?"圆圈工具栏 · 左上一页 · 右下一页":"圆圈全屏 · 左回首页 · 右工具栏",EPD_DRAW_ALIGN_LEFT,false);
         ui_text_box(fb,(EpdRect){58,card.y+103,564,34},19,preset==1?"圆圈键长按：返回主页":"圆圈键长按：手动全刷",EPD_DRAW_ALIGN_LEFT,false);
-#else
-        ui_text_box(fb,(EpdRect){58,card.y+59,564,40},21,preset==1?"左上一页 · 中工具栏 · 右下一页":"左回首页 · 中全屏 · 右工具栏",EPD_DRAW_ALIGN_LEFT,false);
-        ui_text_box(fb,(EpdRect){58,card.y+103,564,34},19,preset==1?"中键长按：返回主页":"中键长按：手动全刷",EPD_DRAW_ALIGN_LEFT,false);
-#endif
     }
     ui_fill_round_rect(fb, (EpdRect){36, 1141, 612, 58}, 20, UI_GRAY_BLACK);
     reader_panel_text_vc(fb, 342, 1170, 26, "完成", EPD_DRAW_ALIGN_CENTER, true);
 }
 static void draw_key_picker(uint8_t *fb) {
-#if KIIKO_BOARD_METALIO47
     static const char *const titles[] = {"左键功能", "圆圈键功能", "右键功能", "圆圈键长按功能"};
-#else
-    static const char *const titles[] = {"左键功能", "中键功能", "右键功能", "中键长按功能"};
-#endif
     draw_sheet(fb, 270, titles[s_reader_key_pick < 4 ? s_reader_key_pick : 0]);
     draw_sheet_back(fb, 270);
     for (int i = 0; i < APP_READER_KEY_COUNT; ++i) {
@@ -3432,8 +3198,6 @@ static EpdRect reader_font_pick_rect(int slot) {
 static void draw_font_picker(uint8_t* fb) {
     const int top = reader_font_picker_top();
     draw_sheet(fb, top, "字体");
-#if KIIKO_BOARD_METALIO47
-#endif
     epd_draw_line(55, top + 49, 64, top + 58, UI_GRAY_BLACK, fb);
     epd_draw_line(64, top + 58, 73, top + 49, UI_GRAY_BLACK, fb);
     int count = ttf_font_count();
@@ -3444,10 +3208,6 @@ static void draw_font_picker(uint8_t* fb) {
     ui_text_box(fb,(EpdRect){90,top+94,504,32},20,current,EPD_DRAW_ALIGN_CENTER,false);
     int start = s_font_page * BOOK_FONT_PAGE;
     char active[TTF_FONT_PATH_MAX]; copy_text(active, sizeof(active), ttf_font_path());
-#if KIIKO_BOARD_METALIO47
-#else
-    bool active_builtin = ttf_font_is_builtin();
-#endif
     for (int slot = 0; slot < BOOK_FONT_PAGE && start + slot < count; ++slot) {
         const ttf_font_item_t* item = ttf_font_item(start + slot);
         EpdRect card = reader_font_pick_rect(slot);
@@ -3456,25 +3216,13 @@ static void draw_font_picker(uint8_t* fb) {
         ui_draw_control_frame(fb, card, 18, selected ? 0x48 : 0x98);
         char label[TTF_FONT_NAME_MAX];
         copy_text(label, sizeof(label), font_friendly_name(item));
-#if KIIKO_BOARD_METALIO47
         if (!ttf_font_draw_preview(item->path, fb, card.x + card.width/2, card.y + 63,
                                     ui_text_effective_px(25), label, card.width-32)) {
-#else
-        if (ttf_font_open(item->path) == ESP_OK) {
-            fit_text(label,25,card.width-32);
-            draw_font_name_with_current_face(fb, card.x + card.width/2, card.y + 63, label,card.width-32);
-        } else {
-#endif
             fit_fixed_text(label, ui_text_effective_px(25), card.width - 32);
             ui_text_box(fb,ui_inset_rect(card,16),25,label,EPD_DRAW_ALIGN_CENTER,false);
         }
         if (selected) epd_fill_circle(card.x+card.width-22,card.y+22,7,UI_GRAY_BLACK,fb);
     }
-#if KIIKO_BOARD_METALIO47
-#else
-    if (active_builtin) (void)ttf_font_open_builtin();
-    else if (active[0]) (void)ttf_font_open(active);
-#endif
     // 字体名称预览归还真实阅读字库后，再确认本次选择是否回退。
     // Observe the actual reader face after name previews have restored it.
     reader_font_choice_finish();
@@ -3714,7 +3462,6 @@ static void draw_reader_stats_recent(uint8_t* fb) {
     reader_panel_text(fb, 642, base_y + 22, 19, "今天", EPD_DRAW_ALIGN_RIGHT, false);
 }
 
-#if KIIKO_BOARD_METALIO47
 static EpdRect reader_fast_panel_rect(void) {
     if(!display_reader_fast_panels_enabled())return(EpdRect){0};
     int top;
@@ -3723,16 +3470,13 @@ static EpdRect reader_fast_panel_rect(void) {
     else return(EpdRect){0};
     return(EpdRect){0,top,UI_LOCK_WIDTH,UI_LOCK_HEIGHT-top};
 }
-#endif
 static void draw_reader_panel(uint8_t* fb) {
     if(rc_draw_current(fb))return;
     if (s_reader_panel==READER_PANEL_NONE && s_reader_fullscreen) return;
-#if KIIKO_BOARD_METALIO47
     EpdRect fast_panel=reader_fast_panel_rect();
     // 两个快面板用实底承接四灰，圆角外不混入底页文字/图片灰阶。
     // Use an opaque target for the two fast panels so rounded corners never quantize underlying body/art tones.
     if(fast_panel.height)ui_fill_rect_fast(fast_panel,UI_GRAY_WHITE,fb);
-#endif
     ui_text_set_system_scale(true);
     if (reader_tools_visible()) {
         ui_fill_rect_fast((EpdRect){0, 1096, UI_LOCK_WIDTH, 120}, s_reader_fullscreen?UI_GRAY_WHITE:UI_NAV_BACKGROUND_GRAY, fb);
@@ -3761,9 +3505,7 @@ static void draw_reader_panel(uint8_t* fb) {
     else if (s_reader_panel == READER_PANEL_KEY_SETTINGS) draw_key_settings(fb);
     else if (s_reader_panel == READER_PANEL_KEY_PICKER) draw_key_picker(fb);
     ui_text_set_system_scale(false);
-#if KIIKO_BOARD_METALIO47
     if(fast_panel.height)(void)display_reader_panel_gray4_prepare(fb,fast_panel);
-#endif
 }
 
 /* ---- 绘制与预渲染 / Drawing and preparation ---- */
@@ -4112,16 +3854,6 @@ static void draw_zoomed_image(uint8_t *fb, EpdRect band, int scale, int cx, int 
     }
 }
 /* ---- 跟手帧：1bit 目标帧 / Gesture frames from a 1-bit target ---- */
-// 物理像素反解成逻辑坐标，与 epdiy 的 _rotate 一一对应。
-// Map a physical pixel back to logical coordinates, mirroring epdiy's _rotate().
-static void reader_phys_to_logical(int px, int py, int *lx, int *ly) {
-    switch (epd_get_rotation()) {
-        case EPD_ROT_PORTRAIT: *lx = py; *ly = epd_width() - 1 - px; break;
-        case EPD_ROT_INVERTED_LANDSCAPE: *lx = epd_width() - 1 - px; *ly = epd_height() - 1 - py; break;
-        case EPD_ROT_INVERTED_PORTRAIT: *lx = epd_height() - 1 - py; *ly = px; break;
-        default: *lx = px; *ly = py; break;
-    }
-}
 
 // 旋转把两个轴整体对调或翻转，所以各建一张轴映射表，逐像素只剩数组取值；点阵图按物理行
 // 顺序写，顺序内存访问比逐像素 nibble 读写快得多。灰度双线性只在松手后做。
@@ -4589,7 +4321,6 @@ static void draw_reader(uint8_t *fb,size_t page) {
         book_layout_draw_page(fb,page,body_rect(),s_px);
     draw_reader_outer(fb,page);
 }
-#if KIIKO_BOARD_METALIO47
 // 复用现有四槽正文，无新整帧缓存；覆盖层不存进正文槽，正文/字体变化沿原代次和失效规则。
 // 带图页也能走缓存：预排已把插图位图合成进那一帧，只有缩放/平移期间必须现场重画。
 // Reuse the existing four body slots without another frame; never cache overlays, and retain
@@ -4615,13 +4346,8 @@ static void draw_reader_cached(uint8_t *fb,size_t page) {
         (void)reader_page_cache_store(page,book_layout_generation(),fb,fb_bytes(),page);
     ESP_LOGI(TAG,"reader UI cached=%d panel=%d",cached!=NULL,s_reader_panel);
 }
-#endif
 // 预绘只在同步推屏期间借用字体；结束前逐行停止并交还，输入回调不等待整页预绘。
 // Prefetch borrows fonts only during synchronous output; stop between rows before returning, never joining a whole page for input.
-#if KIIKO_BOARD_METALIO47
-#else
-#define BOOK_PREP_RESERVE (1024u * 1024u)
-#endif
 #define BOOK_PREP_IDLE_US 4000
 /*
  * allow_decode：只有后台预绘任务可以在这里解码（一张整页图要几百毫秒），UI 的空闲预绘路径
@@ -4635,15 +4361,10 @@ static int reader_prefetch_step(void) {
     dither_lut_build();
     int result=book_layout_draw_slice(s_next_fb,(size_t)s_prep_page,body_rect(),s_px,&s_prep_cursor);
     if(result<0)invalidate_prep();
-#if KIIKO_BOARD_METALIO47
     else if(result>0){s_next_page=s_prep_page;s_next_generation=book_layout_generation();
         reader_page_cache_finish((size_t)s_prep_page,s_next_generation);}
-#else
-    else if(result>0){s_next_page=s_prep_page;s_next_generation=book_layout_generation();}
-#endif
     return result;
 }
-#if KIIKO_BOARD_METALIO47
 // 一张已绘当前页 + 上一页 + 后两页，字库只在现有绘制锁下借用。
 // Cache current/previous/two future pages; borrow faces only under the existing draw lock.
 static bool reader_prefetch_target(void) {
@@ -4668,12 +4389,6 @@ static bool reader_prefetch_target(void) {
         s_prep_page=target;memset(&s_prep_cursor,0,sizeof(s_prep_cursor));
         s_next_fb=reader_page_cache_begin((size_t)target,generation,fb_bytes(),s_page);
     }
-#else
-static bool reader_prefetch_buffer(void) {
-    size_t need=fb_bytes();
-    if(!s_next_fb&&heap_caps_get_free_size(MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)>need+BOOK_PREP_RESERVE)
-        s_next_fb=heap_caps_aligned_alloc(16,need,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
-#endif
     return s_next_fb!=NULL;
 }
 static void prep_task(void *arg) {
@@ -4689,19 +4404,7 @@ static void prep_task(void *arg) {
     }
 }
 static bool kick_prep(void) {
-#if KIIKO_BOARD_METALIO47
     if(!reader_prefetch_target())return false;
-#else
-    if(s_view!=READING||!s_text||s_toolbar||s_clear_confirm||s_reader_panel!=READER_PANEL_NONE||
-       s_page+1>=book_layout_page_count()||book_layout_page_image_count(s_page)||
-       book_layout_page_image_count(s_page+1)||app_settings_book_background_path()[0])return false;
-    int target=(int)s_page+1;
-    if(s_next_page==target&&s_next_generation==book_layout_generation())return false;
-    if(s_prep_page!=target||s_prep_cursor.generation!=book_layout_generation()){
-        s_next_page=-1;s_next_generation=0;s_prep_page=target;memset(&s_prep_cursor,0,sizeof(s_prep_cursor));
-    }
-    if(!reader_prefetch_buffer())return false;
-#endif
     if(!s_draw_lock)s_draw_lock=xSemaphoreCreateMutex();
     if(!s_prep_done)s_prep_done=xSemaphoreCreateBinary();
     if(!s_prep_task&&s_draw_lock&&s_prep_done&&
@@ -4728,7 +4431,6 @@ static bool reader_prefetch_resume(size_t page) {
     return s_next_page==(int)page&&s_next_generation==book_layout_generation();
 }
 static void reader_prefetch_idle(app_ctx_t *ctx) {
-#if KIIKO_BOARD_METALIO47
     if(ctx->consumed||ctx->request_app||ctx->request_menu||ctx->request_return||
        (ctx->touch&&ctx->touch->touched))return;
     lock_draw();
@@ -4736,23 +4438,8 @@ static void reader_prefetch_idle(app_ctx_t *ctx) {
         const int64_t deadline=esp_timer_get_time()+BOOK_PREP_IDLE_US;
         for(unsigned row=0;row<8;++row)
             if(reader_prefetch_step()!=0||esp_timer_get_time()>=deadline)break;
-#else
-    if(s_view!=READING||!s_text||s_toolbar||s_clear_confirm||s_reader_panel!=READER_PANEL_NONE||
-       ctx->consumed||ctx->request_app||ctx->request_menu||ctx->request_return||
-       (ctx->touch&&ctx->touch->touched)||s_prep_page!=(int)s_page+1)return;
-    if(app_settings_book_background_path()[0]||book_layout_page_image_count(s_page)||
-       book_layout_page_image_count(s_page+1)||s_page+1>=book_layout_page_count())return;
-    if(s_next_page==s_prep_page&&s_next_generation==book_layout_generation())return;
-    if(!reader_prefetch_buffer())return;
-    const int64_t deadline=esp_timer_get_time()+BOOK_PREP_IDLE_US;
-    for(unsigned row=0;row<8;++row){
-        if(reader_prefetch_step()!=0||esp_timer_get_time()>=deadline)break;
-#endif
     }
-#if KIIKO_BOARD_METALIO47
     unlock_draw();
-#else
-#endif
 }
 /* ------------------------------------------------------------------ */
 /* 逐章缓存：首开等待页与目录按需下载                                  */
@@ -4809,14 +4496,6 @@ static int64_t s_warm_retry_ms;
 static unsigned s_warm_retries;
 static unsigned s_cache_shown_done, s_cache_shown_percent;
 
-static const char *cache_state_text(size_t chapter) {
-    switch (book_chapter_cache_state(chapter)) {
-    case BOOK_CH_CACHE_PENDING: return "正在缓存本章";
-    case BOOK_CH_CACHE_FAILED: return "本章缓存失败，可重试";
-    case BOOK_CH_CACHE_MISSING: return "本章尚未缓存";
-    default: return "";
-    }
-}
 
 // 等待页只读本地状态：章节数来自目录，百分比来自单章下载阶段。
 // The waiting page reads local state only: the total comes from the TOC, the percentage from
@@ -4960,8 +4639,6 @@ static size_t current_toc_position(void) {    if(book_kind()==BOOK_KIND_TXT){siz
 static void render(app_ctx_t* ctx, uint8_t* fb) {
     lock_draw();
     if(s_view==READING)ttf_set_antialias(app_settings_book_antialias());
-#if KIIKO_BOARD_METALIO47
-#endif
     ui_text_set_system_scale(s_view != READING);
     if (s_view == EDIT) { draw_editor(fb); unlock_draw(); return; }
     if (s_view == SEARCH) { draw_search(fb); unlock_draw(); return; }
@@ -4998,11 +4675,7 @@ static void render(app_ctx_t* ctx, uint8_t* fb) {
             unlock_draw();
             return;
         }
-#if KIIKO_BOARD_METALIO47
         draw_reader_cached(fb,s_page);
-#else
-        draw_reader(fb, s_page);
-#endif
         unlock_draw();
         return;
     }
@@ -5019,9 +4692,7 @@ static void render(app_ctx_t* ctx, uint8_t* fb) {
     draw_shelf_header_button(fb, shelf_manage_rect(), false);
     draw_shelf_header_button(fb, shelf_sort_rect(), true);
     draw_shelf_page_artwork(ctx,fb);
-#if KIIKO_BOARD_METALIO47
     update_shelf_cover_hint(ctx);
-#endif
     if(!s_scan_pending&&s_query[0]&&!s_visible_count&&!s_message[0]) {
         ui_text_vc(fb,342,410,28,"未找到匹配的书籍",EPD_DRAW_ALIGN_CENTER,false);
         ui_text_vc(fb,342,460,21,"点击 X 退出搜索",EPD_DRAW_ALIGN_CENTER,false);
@@ -5032,11 +4703,7 @@ static void render(app_ctx_t* ctx, uint8_t* fb) {
         // 32列对齐后的封面/书架区；顶部状态栏、题头和下方分页不做黑色强整理。
         // Aligned cover/furniture area; status, title and lower pagination never enter the dark settling pass.
         const EpdRect artwork={0,192,UI_LOCK_WIDTH,800};
-#if KIIKO_BOARD_METALIO47
         display_main_transition_cover_bands(&artwork,1);
-#else
-        display_main_transition_gray_bands(&artwork,1);
-#endif
     }
     draw_shelf_pager(fb, s_visible_count, ctx->leaf, leaves());
     ui_nav_draw(fb, 1);
@@ -5079,7 +4746,6 @@ static app_redraw_t reader_clock_tick(app_ctx_t *ctx) {
     s_reader_clock_pending=true;
     return APP_REDRAW_AREA;
 }
-#if KIIKO_BOARD_METALIO47
 static struct {
     bool valid,fullscreen;const char *text;size_t page,chapter;
     uint32_t generation;int rotation;reader_panel_t panel;unsigned images;
@@ -5190,8 +4856,6 @@ static bool reader_slider_feedback_present(app_ctx_t *ctx,app_redraw_t redraw) {
     reader_panel_record(err);s_reader_text_frame=false;s_du_count=0;
     guard_draw_result(ctx->hl,err);return true;
 }
-#endif
-#if KIIKO_BOARD_METALIO47
 static enum EpdDrawError reader_soft_present(app_ctx_t* ctx,EpdRect area) {
     // 用户2026-11-03：普通翻页不再走整页hl_update（约15ms/相），改用与水波纹/速读相同的
     // 单带1K相位表引擎（约12ms/相），接近Pico翻页速度。
@@ -5234,15 +4898,12 @@ static enum EpdDrawError reader_image_present(app_ctx_t* ctx,EpdRect area) {
         ? update_display_area_full_with(ctx->hl,wave,MODE_GL16,area)
         : update_display_area_diff_with(ctx->hl,wave,MODE_GL16,area);
 }
-#endif
 
 static bool present_book_frame(app_ctx_t* ctx, app_redraw_t redraw) {
     bool rc_full=s_view==READING&&(s_reader_panel==READER_PANEL_TOUCH_SETTINGS||s_reader_panel==READER_PANEL_TOUCH_MORE);
     bool rc_transition=rc_full||s_rc_full_was_visible;s_rc_full_was_visible=rc_full;
     if((rc_transition||rc_custom_modal())&&(redraw==APP_REDRAW_PAGE||redraw==APP_REDRAW_FULL)){
-#if KIIKO_BOARD_METALIO47
         s_reader_panel_frame.valid=false;
-#endif
         return false;
     }
 
@@ -5252,13 +4913,9 @@ static bool present_book_frame(app_ctx_t* ctx, app_redraw_t redraw) {
         enum EpdDrawError err=update_display_full(ctx->hl);guard_draw_result(ctx->hl,err);
         if(err==EPD_DRAW_SUCCESS){s_presented_view=s_view;s_cover_dirty_mask=0;}return true;
     }
-#if KIIKO_BOARD_METALIO47
-#endif
     if(reader_indent_present(ctx,redraw))return true;
-#if KIIKO_BOARD_METALIO47
     if(reader_panel_fast_present(ctx,redraw))return true;
     if(reader_slider_feedback_present(ctx,redraw))return true;
-#endif
     if(s_shelf_key_paint_pending && redraw==APP_REDRAW_AREA && s_view==SHELF && !ctx->request_app){
         s_shelf_key_paint_pending=false;
         guard_draw_result(ctx->hl,update_display_area_diff_with(ctx->hl,&E0470_FOLLOW_WAVEFORM,MODE_DU,s_area));
@@ -5302,10 +4959,8 @@ static bool present_book_frame(app_ctx_t* ctx, app_redraw_t redraw) {
             (void)ui_reader_background_prepare(app_settings_book_background_path());
         prepare_inline_image();
     }
-#if KIIKO_BOARD_METALIO47
     const bool reader_prepare=redraw==APP_REDRAW_PAGE&&s_view==READING&&s_text;
     const bool reader_prepared=reader_prepare?display_page_prepare_begin():false;
-#endif
     int64_t start = esp_timer_get_time();
     const int64_t frame_minute=ui_nav_clock_minute();
     if (redraw == APP_REDRAW_PAGE || redraw == APP_REDRAW_FULL) render(ctx, ctx->fb);
@@ -5328,15 +4983,9 @@ static bool present_book_frame(app_ctx_t* ctx, app_redraw_t redraw) {
     // 入书/目录返回只对目标页做一次完整清理；后续正文和面板保留各自出口。
     // Clean a reader entry/TOC return once with the complete target page; retain subsequent body/panel routes.
     if(reader_entry)
-#if KIIKO_BOARD_METALIO47
         // 入书先物理清白，再以原厂完整灰阶从白底绘制；覆盖封面/图片上的书架残影。
         // Clear the optical state before drawing the entry frame from white, retaining vendor grays.
         err=update_display_image_gray(ctx->hl);
-#else
-        err=update_display_area_full_with(ctx->hl,&E0470_FULL_WAVEFORM,MODE_GC16,
-                                         (EpdRect){0,0,UI_LOCK_WIDTH,UI_LOCK_HEIGHT});
-#endif
-#if KIIKO_BOARD_METALIO47
     else if ((image_gray_refresh || s_reader_image_exit_pending) &&
              s_view == READING && s_reader_panel == READER_PANEL_NONE &&
              !s_toolbar && !s_clear_confirm && !s_reader_cleanup && redraw != APP_REDRAW_FULL) {
@@ -5352,27 +5001,6 @@ static bool present_book_frame(app_ctx_t* ctx, app_redraw_t redraw) {
         (void)image_area;
         err=reader_image_present(ctx,(EpdRect){0,0,UI_LOCK_WIDTH,UI_LOCK_HEIGHT});
     }
-#else
-    else if (image_gray_refresh && redraw == APP_REDRAW_AREA && !s_reader_cleanup && s_presented_view == (int)READING) {
-        // 灰阶只驱动正文，避免每张插图都把整屏先清白再闪回。
-        // Drive the grayscale body from the current frame instead of clearing the whole screen to white.
-        err = app_settings_reader_turn_effect() == 1
-#if KIIKO_BOARD_METALIO47
-            ? update_display_area_diff_with(ctx->hl, &E0470_FULL_WAVEFORM, MODE_GL16, reader_area())
-#else
-            ? update_display_area_diff_with(ctx->hl, &E0470_WAVEFORM, MODE_GL16, reader_area())
-#endif
-            : update_display_area_with(ctx->hl, &E0470_FULL_WAVEFORM, MODE_GC16, reader_area());
-    }
-    else if (image_gray_refresh) err = app_settings_reader_turn_effect() == 1 &&
-        redraw != APP_REDRAW_FULL && !s_reader_cleanup
-#if KIIKO_BOARD_METALIO47
-        ? update_display_with(ctx->hl, &E0470_FULL_WAVEFORM, MODE_GL16)
-#else
-        ? update_display_mode_diff(ctx->hl, MODE_GL16)
-#endif
-        : update_display_with(ctx->hl, &E0470_FULL_WAVEFORM, MODE_GC16);
-#endif
     else if (s_reader_cleanup && redraw != APP_REDRAW_FULL)
         // 周期清理使用完整原厂灰阶定稿，保留饱和驱动；一次输出，不叠加擦白或文字补刷。
         // Periodic cleanup retains the complete vendor settling/saturation phases in one output, without erase or text replay.
@@ -5389,7 +5017,6 @@ static bool present_book_frame(app_ctx_t* ctx, app_redraw_t redraw) {
         // 翻页效果只由三档阅读设置决定；WeRead/Wi-Fi 上报不参与此分流。
         // The three reader settings alone select the turn effect; WeRead/Wi-Fi reporting is independent.
         EpdRect turn_area=s_area;
-#if KIIKO_BOARD_METALIO47
         const bool short_panel_area=s_reader_panel!=READER_PANEL_NONE&&s_mode==MODE_GL16&&
             reader_panel_short_ready(APP_REDRAW_PAGE)&&s_area.width>0&&s_area.height>0;
         if(short_panel_area) {
@@ -5405,49 +5032,19 @@ static bool present_book_frame(app_ctx_t* ctx, app_redraw_t redraw) {
         } else {
             err=update_display_area_with(ctx->hl,&E0470_WAVEFORM,s_mode,s_area);
         }
-#else
-        err = s_water_turn_pending ? update_display_water_turn(ctx->hl,s_area,s_water_turn_dir)
-            : s_reader_turn_pending && s_mode == MODE_GL16 && app_settings_reader_turn_effect() == 2 &&
-              s_view == READING && s_presented_view == (int)READING &&
-              s_reader_panel == READER_PANEL_NONE && !s_toolbar && !s_clear_confirm &&
-              !book_layout_page_image_count(s_page) && !app_settings_book_background_path()[0]
-                ? update_display_text_turn(ctx->hl, turn_area, E0470_TURN_RTL)
-#endif
-#if !KIIKO_BOARD_METALIO47
-            // 普通翻页继续原灰阶差分；速读仅进入已验证的纯文字出口。
-            // Ordinary keeps its gray differences; Fast BW enters only the qualified pure-text outlet.
-            // 普通翻页保留差分迁移；S31整页目标统一维护白底，局部控件仍保留原路径。
-            // Retain ordinary difference transitions; S31 whole-page targets maintain uniform white while local controls keep their paths.
-            : (s_reader_fullscreen || s_reader_turn_pending) && s_mode == MODE_GL16
-                ? update_display_area_diff_with(ctx->hl,
-                    s_reader_turn_pending ? display_main_gray_waveform() : &E0470_WAVEFORM, s_mode, turn_area)
-                : separate_metadata?reader_present_crop(ctx->hl,&E0470_WAVEFORM,s_mode,s_area,false)
-                : update_display_area_with(ctx->hl, &E0470_WAVEFORM, s_mode, s_area);
-#endif
     }
-#if KIIKO_BOARD_METALIO47
     else if(reader_panel_short_ready(redraw))
         err=update_display_reader_panel(ctx->hl,(EpdRect){0,0,UI_LOCK_WIDTH,UI_LOCK_HEIGHT});
-#endif
     else err = s_view == READING
-#if KIIKO_BOARD_METALIO47
         // 面板只输出最终差分，不因开关次数触发正文整屏清理。
         // Present a panel once without counting its opens/closes toward body cleanup.
         ? (s_reader_panel!=READER_PANEL_NONE
             ? update_display_area_diff_with(ctx->hl,&E0470_WAVEFORM,MODE_GL16,
                   (EpdRect){0,0,UI_LOCK_WIDTH,UI_LOCK_HEIGHT})
             : update_display_mode_diff(ctx->hl, APP_PAGE_REFRESH_MODE))
-#else
-        // 面板切换只推最终灰阶目标，不将首次选择水波纹算作周期全刷。
-        // Panel transitions present their final grays without counting first ripple selection as periodic cleanup.
-        ? update_display_area_diff_with(ctx->hl,display_main_normal_waveform(),MODE_GL16,
-              (EpdRect){0,0,UI_LOCK_WIDTH,UI_LOCK_HEIGHT})
-#endif
         : update_display_fast_page(ctx->hl);
     int64_t displayed = esp_timer_get_time();
-#if KIIKO_BOARD_METALIO47
     if(reader_prepare)display_page_prepare_end(reader_prepared);
-#endif
     reader_prefetch_end(prep);
     if (redraw == APP_REDRAW_AREA && s_mode == MODE_DU &&
         !s_reader_cleanup && !image_gray_refresh && !s_shelf_feedback_pending) {
@@ -5471,15 +5068,11 @@ static bool present_book_frame(app_ctx_t* ctx, app_redraw_t redraw) {
     if ((s_view==SHELF || s_view==MANAGE || s_view==BULK) && err==EPD_DRAW_SUCCESS) {
         const bool whole_page = redraw == APP_REDRAW_PAGE || redraw == APP_REDRAW_FULL;
         if (whole_page && (shelf_cover_frame_ready()
-#if KIIKO_BOARD_METALIO47
                            || (s_view == SHELF && s_visible_count > 0)
-#endif
                            )) s_cover_dirty_mask = 0;
         else if (s_cover_batch_present_pending) s_cover_dirty_mask &= ~s_cover_present_mask;
-#if KIIKO_BOARD_METALIO47
         if (s_view == SHELF && (whole_page || s_cover_batch_present_pending))
             s_shelf_cover_hint_dirty = false;
-#endif
     }
     s_cover_present_mask=0;
     if (err==EPD_DRAW_SUCCESS && reader_status_visible() &&
@@ -5488,12 +5081,10 @@ static bool present_book_frame(app_ctx_t* ctx, app_redraw_t redraw) {
     s_reader_text_frame = err == EPD_DRAW_SUCCESS && s_view == READING && s_text &&
         s_reader_panel == READER_PANEL_NONE && !s_toolbar && !s_clear_confirm &&
         book_layout_page_image_count(s_page) == 0 && !app_settings_book_background_path()[0];
-#if KIIKO_BOARD_METALIO47
     s_reader_image_frame = err == EPD_DRAW_SUCCESS && s_view == READING && s_text &&
         s_reader_panel == READER_PANEL_NONE && !s_toolbar && !s_clear_confirm &&
         !app_settings_reader_hide_images() && book_layout_page_image_count(s_page) > 0;
     s_reader_image_exit_pending = false;
-#endif
     s_reader_cleanup = false;
     s_reader_image_refresh_pending = false;
     if(err==EPD_DRAW_SUCCESS) {
@@ -5508,66 +5099,45 @@ static bool present_book_frame(app_ctx_t* ctx, app_redraw_t redraw) {
     s_cover_batch_present_pending = false;
     s_reader_turn_pending = false;
     s_mode = MODE_GL16;
-#if KIIKO_BOARD_METALIO47
     reader_panel_record(err);
-#endif
     return true;
 }
 static bool present(app_ctx_t *ctx, app_redraw_t redraw) {
-#if KIIKO_BOARD_METALIO47
     if (s_view == READING && (redraw == APP_REDRAW_PAGE || redraw == APP_REDRAW_AREA)) {
         wr_reading_display(true);
         bool shown = present_book_frame(ctx, redraw);
         wr_reading_display(false);
         return shown;
     }
-#endif
     return present_book_frame(ctx, redraw);
 }
 
 static app_redraw_t paint_reading(app_ctx_t* ctx, enum EpdDrawMode mode) {
     s_water_turn_pending = false;
     s_reader_turn_pending = false;
-#if KIIKO_BOARD_METALIO47
     s_reader_image_exit_pending = false;
-#endif
     int64_t started = esp_timer_get_time();
     (void)ui_reader_background_prepare(app_settings_book_background_path());
     prepare_inline_image();
     s_reader_image_refresh_pending = !app_settings_reader_hide_images() &&
         book_layout_page_image_count(s_page) > 0 && s_page_images;
-#if KIIKO_BOARD_METALIO47
     wr_reading_display(true);
-#endif
     lock_draw();
-#if KIIKO_BOARD_METALIO47
     const uint8_t *cached_pixels=reader_page_cache_find(s_page,book_layout_generation(),fb_bytes());
     if(!s_toolbar&&!s_clear_confirm&&!cached_pixels&&s_next_fb&&reader_prefetch_resume(s_page))
         cached_pixels=reader_page_cache_find(s_page,book_layout_generation(),fb_bytes());
     bool cached = !s_toolbar && !s_clear_confirm && cached_pixels;
-#else
-    bool cached = !s_toolbar && !s_clear_confirm && s_next_fb &&
-                  ((s_next_page == (int)s_page && s_next_generation == book_layout_generation()) ||
-                   reader_prefetch_resume(s_page));
-#endif
     if (cached) {
-#if KIIKO_BOARD_METALIO47
         memcpy(ctx->fb, cached_pixels, fb_bytes());
-#else
-        memcpy(ctx->fb, s_next_fb, fb_bytes());
-#endif
         draw_reader_outer(ctx->fb,s_page);
     }
     else draw_reader(ctx->fb, s_page);
     // 下一页可能预渲染于数分钟前，复制后以当前时间重绘状态栏。
     // A prefetched page can be minutes old; replace its status with the current time.
     if (cached && reader_status_visible()) reader_status_paint(ctx->fb);
-#if KIIKO_BOARD_METALIO47
     if(!s_toolbar&&!s_clear_confirm&&!s_reader_notice[0]&&!book_layout_page_image_count(s_page)&&
        !app_settings_book_background_path()[0])
         (void)reader_page_cache_store(s_page,book_layout_generation(),ctx->fb,fb_bytes(),s_page);
-#else
-#endif
     unlock_draw();
     ESP_LOGI(TAG, "paint cached=%d ms=%lld", cached, (esp_timer_get_time() - started) / 1000);
     s_area = reader_area();
@@ -5618,11 +5188,9 @@ static void flush_ticket_stats(void) {
     }
 }
 static void track_ticket_stats(app_ctx_t* ctx) {
-#if KIIKO_BOARD_METALIO47
     wr_reading_tick(s_view == READING && s_text && !s_toolbar &&
                     ctx->now_ms-s_stats_activity_ms <= 300000,ctx->now_ms,
                     (unsigned)s_chapter,(unsigned)reader_page_offset(s_page),(unsigned)percent(s_page));
-#endif
     if (s_view != READING || !s_text) { s_stats_last_ms = ctx->now_ms; return; }
     if (s_stats_last_ms > 0 && ctx->now_ms >= s_stats_last_ms &&
         ctx->now_ms - s_stats_last_ms <= 5000 &&
@@ -5635,7 +5203,6 @@ static void track_ticket_stats(app_ctx_t* ctx) {
     if (s_stats_pending_ms >= 30000) flush_ticket_stats();
 }
 static void free_book(void) {
-#if KIIKO_BOARD_METALIO47
     /* 关书即停这本书的缓存任务：预取还在下这一本的章节时，worker 不会空出来，
      * 打开下一本书只能被告知"请等待当前操作完成"，或者等待页一直等不到自己的章。
      * 只针对这本书——换书时新书已经起来的预取不受影响。
@@ -5646,30 +5213,21 @@ static void free_book(void) {
     wr_cache_pause(s_path);
     wr_reading_stop(true);
     reader_font_reload_cancel();
-#endif
     reader_font_recovery_reset();
-#if KIIKO_BOARD_METALIO47
     if(s_ticket_cover_started) {
         book_cover_jobs_cancel(s_cover_generation);s_cover_generation=0;
     }
     s_ticket_cover_started=s_ticket_cover_done=false;
-#endif
     s_chapter_jump_undo.valid = false;
     s_chapter_jump_digits[0] = 0;
     flush_ticket_stats();
     e0470_page_turn_release();
     s_water_turn_pending = false;
     s_reader_turn_pending = s_reader_text_frame = false;
-#if KIIKO_BOARD_METALIO47
     s_reader_image_frame = s_reader_image_exit_pending = false;
-#endif
     pending_progress_t* pending = pending_find(s_path);
     if (pending && !pending->dirty) pending_discard(s_path);
-#if KIIKO_BOARD_METALIO47
     invalidate_prep();reader_page_cache_clear();
-#else
-    invalidate_prep();
-#endif
     book_layout_set_image_dims(NULL, NULL);
     s_reader_dims_ctx = (reader_dims_ctx_t){0};
     book_layout_free();
@@ -5699,12 +5257,8 @@ static void free_book(void) {
     s_text_len = 0;
     s_selected_toc = SIZE_MAX;
     s_jump_offset = SIZE_MAX;
-#if KIIKO_BOARD_METALIO47
     book_close();s_chapter_warm_target=SIZE_MAX;s_chapter_warm_done=false;
     s_chapter_warm_retry=0;s_turn_direction=1;
-#else
-    book_close();
-#endif
     s_path[0] = 0;
     s_reader_favorite = false;
     s_book_title[0] = 0;
@@ -5852,12 +5406,10 @@ static void prepare_inline_image(void) {
     s_page_images_for = s_page; s_page_images_generation = generation;
     int count = reader_image_slots(s_page);
     if (changed_layout_or_image || count > 0) invalidate_prep();
-#if KIIKO_BOARD_METALIO47
     // 带图页不预排，所以这一页的帧缓存不该留：翻过去时反正要重新解图重画。
     // Illustrated pages are not prefetched, so their frame must not stay cached: the turn will
     // decode and repaint anyway.
     if(count>0){reader_page_cache_clear();s_next_fb=NULL;}
-#endif
     if (!count) {
         ESP_LOGI(TAG, "inline page %u: %d image slots", (unsigned)s_page, count);
         return;
@@ -6123,20 +5675,13 @@ static bool open_book_impl(app_ctx_t* ctx, const char* path) {
     s_shelf_key_mode=s_shelf_key_paint_pending=false;s_shelf_key_delta=s_shelf_key_pressed=0;
     // 书架封面和上一本书的预渲染缓冲可以重建；先释放，再解析 EPUB。
     // Cover and previous-page caches are rebuildable; release them before EPUB parsing.
-#if KIIKO_BOARD_METALIO47
     metalio_cover_cache_trim(512u*1024u);
-#else
-#endif
     book_shelf_page_release();
     invalidate_covers();
     app_home_release_clock_cache();
     lock_draw();
     invalidate_prep();
-#if KIIKO_BOARD_METALIO47
     reader_page_cache_clear();
-#else
-    free(s_next_fb);
-#endif
     s_next_fb = NULL;
     unlock_draw();
     if (network.network_ready) ttf_font_cache_clear();
@@ -6186,11 +5731,7 @@ static bool open_book_impl(app_ctx_t* ctx, const char* path) {
         copy_text(s_message, sizeof(s_message),
                   err == ESP_ERR_NOT_SUPPORTED ? "文件格式或压缩方式暂不支持" :
                   err == ESP_ERR_NO_MEM ? "内存不足，请重启后重试" :
-#if KIIKO_BOARD_METALIO47
                   err == ESP_ERR_INVALID_SIZE ? "图书结构异常或资源超限" :
-#else
-                  err == ESP_ERR_INVALID_SIZE ? "图书资源过大或章节过多" :
-#endif
                   "无法打开图书，请检查文件");
         ESP_LOGW(TAG, "open failed: %s internal=%u/%u psram=%u/%u", esp_err_to_name(err),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
@@ -6201,9 +5742,7 @@ static bool open_book_impl(app_ctx_t* ctx, const char* path) {
         return false;
     }
     copy_text(s_path, sizeof(s_path), path);
-#if KIIKO_BOARD_METALIO47
     s_ticket_cover_started=s_ticket_cover_done=false;
-#endif
     s_reader_favorite = favorite_load(path);
     const char* filename = strrchr(path, '/');
     filename = filename ? filename + 1 : path;
@@ -6317,27 +5856,18 @@ static void cover_cache_warm_async(const char* path) {
     if (xTaskCreate(cover_warm_task, "cover_warm", 12288, arg, 1, NULL) != pdPASS) free(arg);
 }
 static bool open_book(app_ctx_t *ctx, const char *path) {
-#if KIIKO_BOARD_METALIO47
     bool offline = app_weread_take_offline(path);
     if (!offline && !s_requested_resume_mode && app_weread_confirm_open(ctx,path,s_open_from_home)) return false;
     bool return_weread = app_weread_take_return();
-#endif
     if (!book_cover_jobs_quiesce(2000)) {
         copy_text(s_message,sizeof(s_message),"封面任务正在收尾，请稍后再试");return false;
     }
-#if KIIKO_BOARD_METALIO47
     if (pico_boot_book_begin(path) != ESP_OK) {
-#else
-    esp_err_t checkpoint_error=pico_boot_book_begin(path);
-    if (checkpoint_error != ESP_OK) {
-        ESP_LOGW("book", "open checkpoint failed: %s", esp_err_to_name(checkpoint_error));
-#endif
         copy_text(s_message, sizeof(s_message), "启动记录保存失败，请重试");
         return false;
     }
     bool ok = open_book_impl(ctx, path);
     pico_boot_book_end(ok);
-#if KIIKO_BOARD_METALIO47
     s_reader_return_weread = return_weread && ok;
     /*
      * 只有"用户主动选了离线阅读"才不上报。不能在这里加 wr_online()：开书那一刻 Wi-Fi
@@ -6348,7 +5878,6 @@ static bool open_book(app_ctx_t *ctx, const char *path) {
      * could never bring it back. Accumulation and catch-up are handled downstream.
      */
     if (ok) wr_reading_start(path, !offline, ctx->now_ms);
-#endif
     if (ok) cover_cache_warm_async(s_path);
     return ok;
 }
@@ -6359,13 +5888,9 @@ static bool open_requested_book(app_ctx_t* ctx) {
     bool from_home = s_requested_open_home;
     s_requested_open[0] = 0;
     s_requested_open_home = false;
-#if KIIKO_BOARD_METALIO47
     s_open_from_home = from_home;
-#endif
     bool opened = open_book(ctx, path);
-#if KIIKO_BOARD_METALIO47
     s_open_from_home = false;
-#endif
     s_requested_fullscreen = false;
     s_requested_resume_mode = false;
     if (!opened) return false;
@@ -6770,11 +6295,7 @@ static bool shelf_backfill_visit(const char* path, const book_progress_t* progre
 static bool shelf_backfill_read_books(bool* truncated) {
     nvs_handle_t favorites = 0;
     nvs_handle_t hidden = 0;
-#if KIIKO_BOARD_METALIO47
     (void)nvs_open("mt_favs", NVS_READONLY, &favorites);
-#else
-    (void)nvs_open("rp_favs", NVS_READONLY, &favorites);
-#endif
     (void)nvs_open(SHELF_HIDDEN_NS, NVS_READONLY, &hidden);
     const int before = s_count;
     shelf_backfill_t backfill = {.favorites = favorites, .hidden = hidden};
@@ -6941,11 +6462,7 @@ static void scan_shelf(app_ctx_t* ctx) {
     bool truncated = false, unreadable = root_err != ESP_OK || book_store_roots_degraded(), skipped = false;
     nvs_handle_t favorites = 0;
     nvs_handle_t hidden = 0;
-#if KIIKO_BOARD_METALIO47
     (void)nvs_open("mt_favs", NVS_READONLY, &favorites);
-#else
-    (void)nvs_open("rp_favs", NVS_READONLY, &favorites);
-#endif
     (void)nvs_open(SHELF_HIDDEN_NS, NVS_READONLY, &hidden);
     s_storage[0] = 0;
     for (int i = 0; i < n; ++i) {
@@ -7138,16 +6655,11 @@ static app_redraw_t turn_page(app_ctx_t* ctx, int dir) {
     // chapter, and any page it lands on is discarded when the real chapter lays out.
     if (s_warm_chapter >= 0 || s_toc_download >= 0) return APP_REDRAW_NONE;
     reader_zoom_reset();
-#if KIIKO_BOARD_METALIO47
     s_turn_direction=dir;
-#else
-#endif
     // 页面图片表可能随跨章加载替换，旧页资格以实际成功显示的画面为准。
     // Chapter loads may replace the image table; the old-page eligibility comes from the displayed frame.
     bool from_text_frame = s_reader_text_frame;
-#if KIIKO_BOARD_METALIO47
     bool from_image_frame = s_reader_image_frame;
-#endif
     bool changed = true;
     if (dir > 0 && s_page + 1 < book_layout_page_count()) ++s_page;
     else if (dir < 0 && s_page) --s_page;
@@ -7183,9 +6695,7 @@ static app_redraw_t turn_page(app_ctx_t* ctx, int dir) {
     // 预渲染未命中时也使用 GL16；到达设定页数后在本次翻页整屏全刷。
     // A cache miss still uses GL16; the selected turn count triggers a full-screen refresh on this turn.
     app_redraw_t redraw = paint_reading(ctx, MODE_GL16);
-#if KIIKO_BOARD_METALIO47
     s_reader_image_exit_pending = !chrome_changed && redraw == APP_REDRAW_AREA && from_image_frame;
-#endif
     s_reader_turn_pending = !chrome_changed && redraw == APP_REDRAW_AREA && from_text_frame &&
         book_layout_page_image_count(s_page) == 0 && !app_settings_book_background_path()[0];
     s_water_turn_pending = !chrome_changed && redraw == APP_REDRAW_AREA && !s_reader_cleanup &&
@@ -7193,31 +6703,6 @@ static app_redraw_t turn_page(app_ctx_t* ctx, int dir) {
                            book_layout_page_image_count(s_page) == 0 && !app_settings_book_background_path()[0];
     s_water_turn_dir = dir > 0 ? E0470_TURN_RTL : E0470_TURN_LTR;
     return chrome_changed ? APP_REDRAW_PAGE : redraw;
-}
-static app_redraw_t resize_text(app_ctx_t* ctx, int dir) {
-    int next = s_px + dir * BOOK_PX_STEP;
-    if (next < BOOK_PX_MIN || next > BOOK_PX_MAX) return APP_REDRAW_NONE;
-    size_t off = book_layout_page_start_offset(s_page);
-    lock_draw();
-    invalidate_prep();
-    int old = s_px;
-    if (!book_layout_build_blocks(s_text, s_text_len, s_blocks, s_block_count, body_rect(), next)) {
-        bool restored = book_layout_build_blocks(s_text, s_text_len, s_blocks, s_block_count, body_rect(), old);
-        unlock_draw();
-        if (!restored) {
-            free_book();
-            s_view = SHELF;
-            copy_text(s_message, sizeof(s_message), "排版失败，请重新扫描并打开图书");
-            return APP_REDRAW_PAGE;
-        }
-        return APP_REDRAW_NONE;
-    }
-    s_px = next;
-    s_page = book_layout_page_for_offset(off);
-    unlock_draw();
-    app_settings_set_book_px(s_px);
-    save_progress();
-    return paint_reading(ctx, MODE_DU);
 }
 
 static app_redraw_t apply_reader_layout(app_ctx_t* ctx, int next_px, int next_margin,
@@ -7383,9 +6868,7 @@ static app_redraw_t reader_manual_refresh(app_ctx_t* ctx) {
     s_reader_slider = -1;
     s_reader_footer_pending = s_reader_image_refresh_pending = false;
     s_water_turn_pending = s_reader_cleanup = false;
-#if KIIKO_BOARD_METALIO47
     s_reader_image_exit_pending = false;
-#endif
     s_du_count = s_turns = 0;
     invalidate_prep();
     return APP_REDRAW_FULL;
@@ -7473,13 +6956,11 @@ static app_redraw_t apply_reader_option(app_ctx_t* ctx, int kind) {
 // Return to this opening's origin; shelf category/page were saved before opening, independently of TOC/tools.
 static app_redraw_t reader_return(app_ctx_t *ctx) {
     save_progress();
-#if KIIKO_BOARD_METALIO47
     if (s_reader_return_weread) {
         s_reader_return_weread = false;
         ui_nav_request(ctx,UI_TAB_WEREAD);
         return APP_REDRAW_NONE;
     }
-#endif
     if (s_reader_return_home) {
         ui_nav_request(ctx, 0);
         return APP_REDRAW_NONE;
@@ -7508,7 +6989,6 @@ static app_redraw_t toggle_reader_fullscreen(app_ctx_t* ctx) {
 }
 
 static app_redraw_t select_reading_font_item(app_ctx_t* ctx, const ttf_font_item_t* item) {
-#if KIIKO_BOARD_METALIO47
     (void)ctx;
     if (!item) return APP_REDRAW_NONE;
     if (s_font_job && !strcmp(s_font_job->path, item->path)) return APP_REDRAW_NONE;
@@ -7533,37 +7013,9 @@ static app_redraw_t select_reading_font_item(app_ctx_t* ctx, const ttf_font_item
         return APP_REDRAW_PAGE;
     }
     return APP_REDRAW_PAGE;
-#else
-
-    if (item && ttf_font_path_is_builtin(item->path)) reader_font_choice_begin(item->path);
-    if (!item || !strcmp(ttf_font_path(), item->path)) return APP_REDRAW_NONE;
-    reader_font_choice_begin(item->path);
-    char previous[TTF_FONT_PATH_MAX];
-    copy_text(previous, sizeof(previous), ttf_font_path());
-    if (ttf_font_open(item->path) != ESP_OK) {
-        reader_font_choice_finish();
-        return APP_REDRAW_PAGE;
-    }
-    size_t off = book_layout_page_start_offset(s_page);
-    lock_draw();
-    invalidate_prep();
-    bool ok = book_layout_build_blocks(s_text, s_text_len, s_blocks, s_block_count, body_rect(), s_px);
-    if (ok) s_page = book_layout_page_for_offset(off);
-    else if (previous[0]) {
-        (void)ttf_font_open(previous);
-        (void)book_layout_build_blocks(s_text, s_text_len, s_blocks, s_block_count, body_rect(), s_px);
-    }
-    unlock_draw();
-    if (!ok) { reader_font_choice_finish(); return APP_REDRAW_PAGE; }
-    app_settings_set_font_path(item->path);
-    copy_text(s_font_path, sizeof(s_font_path), item->path);
-    save_progress();
-    return APP_REDRAW_PAGE;
-#endif
 }
 
 
-#if KIIKO_BOARD_METALIO47
 static app_redraw_t reader_font_reload_tick(app_ctx_t *ctx) {
     (void)ctx;
     reader_font_job_t *job = s_font_job;
@@ -7610,7 +7062,6 @@ static app_redraw_t reader_font_reload_tick(app_ctx_t *ctx) {
     if (ok) save_progress(); else reader_font_choice_finish();
     return APP_REDRAW_PAGE;
 }
-#endif
 
 static int slider_index(EpdRect rect, int x, int count) {
     int span = rect.width - 128;
@@ -7702,7 +7153,6 @@ static void reader_slider_move(int x) {
     reader_slider_map(slider, x);
 }
 
-#if KIIKO_BOARD_METALIO47
 static int reader_slider_value(int slider,bool preview) {
     if(slider==0)return preview?s_reader_preview_px:s_px;
     if(slider==1)return preview?s_reader_preview_margin:s_margin;
@@ -7717,7 +7167,6 @@ static app_redraw_t reader_slider_feedback(app_ctx_t *ctx,int slider) {
     s_area=reader_slider_refresh_rect(slider);s_mode=MODE_GL16;
     return APP_REDRAW_AREA;
 }
-#endif
 
 static app_redraw_t reader_slider_commit(app_ctx_t* ctx) {
     if (s_reader_slider < 0) return APP_REDRAW_NONE;
@@ -7773,9 +7222,7 @@ static app_redraw_t reader_chapter_jump_commit(app_ctx_t *ctx,size_t page,bool r
     s_reader_panel=READER_PANEL_NONE;s_reader_slider=-1;
     s_reader_tap.pending=false;
     s_water_turn_pending=s_reader_turn_pending=s_reader_text_frame=false;
-#if KIIKO_BOARD_METALIO47
     s_reader_image_frame=s_reader_image_exit_pending=false;
-#endif
     s_reader_footer_pending=s_reader_image_refresh_pending=s_reader_cleanup=false;
     unlock_draw();
     release_page_images();prepare_inline_image();
@@ -8149,79 +7596,6 @@ static app_redraw_t reader_panel_action(app_ctx_t* ctx, uint16_t x, uint16_t y) 
         return APP_REDRAW_NONE;
     }
     return APP_REDRAW_NONE;
-}
-static app_redraw_t adjust_spacing(app_ctx_t* ctx, int control) {
-    uint8_t old_line = app_settings_book_line_spacing();
-    uint8_t old_para = app_settings_book_paragraph_spacing();
-    uint8_t line = old_line, para = old_para;
-    if (control == 3 && line > 120) line -= 30;
-    if (control == 4 && line < 180) line += 30;
-    uint8_t para_level=app_settings_book_paragraph_level(para);
-    if (control == 5 && para_level > 0) para=app_settings_book_paragraph_value(para_level-1);
-    if (control == 6 && para_level+1 < APP_BOOK_PARAGRAPH_COUNT) para=app_settings_book_paragraph_value(para_level+1);
-    if (control == 17) { line = 150; para = 50; }
-    if (line == old_line && para == old_para) return APP_REDRAW_NONE;
-    size_t off = book_layout_page_start_offset(s_page);
-    lock_draw();
-    invalidate_prep();
-    book_layout_set_spacing(line, para);
-    bool ok = book_layout_build_blocks(s_text, s_text_len, s_blocks, s_block_count, body_rect(), s_px);
-    if (ok) s_page = book_layout_page_for_offset(off);
-    else {
-        book_layout_set_spacing(old_line, old_para);
-        (void)book_layout_build_blocks(s_text, s_text_len, s_blocks, s_block_count, body_rect(), s_px);
-    }
-    unlock_draw();
-    if (!ok) return APP_REDRAW_NONE;
-    app_settings_set_book_line_spacing(line);
-    app_settings_set_book_paragraph_spacing(para);
-    save_progress();
-    return paint_reading(ctx, MODE_DU);
-}
-static app_redraw_t select_reading_font(app_ctx_t* ctx, int style) {
-    static const char* filenames[] = {
-        "Song.ttf", "Hei.ttf", "Kai.ttf", "WenKai.ttf", "FangSong.ttf", "KingHwa.ttf",
-        "CangErYunHei05.ttf", "ChillKai.ttf"
-    };
-    static const char* names[] = {"宋体", "黑体", "楷体", "文楷", "仿宋", "京华老宋", "仓耳云黑05", "寒蝉正楷"};
-    char path[160];
-    if (snprintf(path, sizeof(path), "%s/%s", app_settings_fonts_dir(), filenames[style]) >= sizeof(path)) return APP_REDRAW_NONE;
-#if KIIKO_BOARD_METALIO47
-#else
-    if (!strcmp(ttf_font_path(), path)) return APP_REDRAW_NONE;
-#endif
-    struct stat font_stat;
-    if (stat(path, &font_stat) != 0) {
-        snprintf(s_message, sizeof(s_message), "请将 %s 字体放入所选字体目录", names[style]);
-        return APP_REDRAW_PAGE;
-    }
-#if KIIKO_BOARD_METALIO47
-    ttf_font_item_t item = {0};
-    copy_text(item.path, sizeof(item.path), path);
-    return select_reading_font_item(ctx, &item);
-#else
-    if (ttf_font_open(path) != ESP_OK) {
-        snprintf(s_message, sizeof(s_message), "请将 %s 字体放入所选字体目录", names[style]);
-        return APP_REDRAW_PAGE;
-    }
-    app_settings_set_font_path(path);
-    s_message[0] = 0;
-    size_t off = book_layout_page_start_offset(s_page);
-    save_progress();
-    lock_draw();
-    invalidate_prep();
-    bool ok = book_layout_build_blocks(s_text, s_text_len, s_blocks, s_block_count, body_rect(), s_px);
-    if (ok) s_page = book_layout_page_for_offset(off);
-    copy_text(s_font_path, sizeof(s_font_path), ttf_font_path());
-    unlock_draw();
-    if (!ok) {
-        free_book(); s_view = SHELF;
-        copy_text(s_message, sizeof(s_message), "字体重排失败，请重新打开图书");
-        return APP_REDRAW_PAGE;
-    }
-    save_progress();
-    return paint_reading(ctx, MODE_GL16);
-#endif
 }
 static app_redraw_t manage_action(app_ctx_t* ctx, uint16_t x, uint16_t y) {
     if (ui_rect_hit(manage_back_rect(), x, y)) {
@@ -8783,14 +8157,10 @@ static app_redraw_t action_at(app_ctx_t* ctx, uint16_t x, uint16_t y) {
                 s_managed = s_shelf[i]; s_view = MANAGE; s_file_removed = s_delete_confirm = true; s_clear_confirm = false;
                 copy_text(s_manage_message, sizeof(s_manage_message), "文件已删除，进度清理失败，请重试");
             } else
-#if KIIKO_BOARD_METALIO47
             {
                 (void)metalio_haptic_click();
                 open_book(ctx, s_shelf[i].path);
             }
-#else
-                open_book(ctx, s_shelf[i].path);
-#endif
         }
         return APP_REDRAW_PAGE;
     }
@@ -8917,8 +8287,6 @@ static void book_on_exit(app_ctx_t* ctx) {
     rc_stop_auto();rc_cancel_side();s_rc_double_pending=false;
     book_shelf_page_pause();
     s_shelf_page_key_valid=s_shelf_page_loading=s_shelf_page_cached=false;
-#if KIIKO_BOARD_METALIO47
-#endif
     reader_indent_hold_cancel();
     // 离开阅读页时丢掉未扫完的连续 DU 相位并还原缩放状态。
     // Leaving the reader drops unfinished continuous-DU phases and the zoom state.
@@ -8944,11 +8312,7 @@ static void book_on_exit(app_ctx_t* ctx) {
     ui_reader_background_release();
     free(s_backgrounds); s_backgrounds = NULL; s_background_count = 0;
     free_book();
-#if KIIKO_BOARD_METALIO47
     reader_page_cache_clear();
-#else
-    free(s_next_fb);
-#endif
     s_next_fb = NULL;
     if(s_prep_task){vTaskDelete(s_prep_task);s_prep_task=NULL;}
     if(s_prep_done){vSemaphoreDelete(s_prep_done);s_prep_done=NULL;}
@@ -8960,8 +8324,6 @@ static void book_on_media_lost(app_ctx_t* ctx) {
     rc_stop_auto();rc_cancel_side();s_rc_double_pending=false;
     book_shelf_page_release();
     s_shelf_page_key_valid=s_shelf_page_loading=s_shelf_page_cached=false;
-#if KIIKO_BOARD_METALIO47
-#endif
     reader_indent_hold_cancel();
     s_shelf_key_mode=s_shelf_key_paint_pending=false;s_shelf_key_delta=s_shelf_key_pressed=0;
     shelf_category_remember(ctx);
@@ -8975,10 +8337,7 @@ static void book_on_media_lost(app_ctx_t* ctx) {
     s_view = SHELF;
     s_count = s_visible_count = 0;
     s_shelf_cache_valid = false;
-#if KIIKO_BOARD_METALIO47
     metalio_cover_cache_clear();
-#else
-#endif
     free(s_shelf); s_shelf = NULL; s_shelf_capacity = 0;
     invalidate_covers();
     ctx->leaf = 0;
@@ -9370,9 +8729,7 @@ static app_redraw_t reader_font_recovery_gesture(app_ctx_t *ctx, const ui_gestur
         if (i) s_font_restart_pending = true;
         else {
             reader_font_recovery_reset();
-#if KIIKO_BOARD_METALIO47
             s_font_runtime_fallback_seen=ttf_font_ready()&&ttf_font_is_builtin();
-#endif
             s_reader_panel = READER_PANEL_FONT_PICKER;
         }
         return APP_REDRAW_PAGE;
@@ -9398,8 +8755,6 @@ static app_redraw_t gesture_event(app_ctx_t* ctx, const ui_gesture_event_t* ev) 
     bool tools_handled = false;
     app_redraw_t tools_redraw = reader_tools_swipe(ctx, ev, &tools_handled);
     if (tools_handled) return tools_redraw;
-#if KIIKO_BOARD_METALIO47
-#endif
     bool zoom_handled = false;
     app_redraw_t zoom_redraw = image_zoom_gesture(ctx, ev, &zoom_handled);
     if(zoom_handled){rc_pause_auto();return zoom_redraw;}
@@ -9491,34 +8846,18 @@ static app_redraw_t gesture_event(app_ctx_t* ctx, const ui_gesture_event_t* ev) 
         if (ev->type == UI_GESTURE_PRESS) {
             int slider = reader_slider_at(ev->x0, ev->y0);
             if (slider >= 0) {
-#if KIIKO_BOARD_METALIO47
                 int previous=reader_slider_value(slider,false);
                 reader_slider_begin(slider,ev->x0);
                 if(reader_slider_value(slider,true)==previous)return APP_REDRAW_NONE;
                 return reader_slider_feedback(ctx,slider);
-#else
-                reader_slider_begin(slider, ev->x0);
-                render(ctx, ctx->fb);
-                s_area = reader_slider_refresh_rect(slider);
-                s_mode = MODE_GL16;
-                return APP_REDRAW_AREA;
-#endif
             }
         } else if (s_reader_slider >= 0) {
             if (ev->type == UI_GESTURE_MOVE) {
                 int slider = s_reader_slider;
-#if KIIKO_BOARD_METALIO47
                 int previous=reader_slider_value(slider,true);
                 reader_slider_move(ev->x);
                 if(reader_slider_value(slider,true)==previous)return APP_REDRAW_NONE;
                 return reader_slider_feedback(ctx,slider);
-#else
-                reader_slider_move(ev->x);
-                render(ctx, ctx->fb);
-                s_area = reader_slider_refresh_rect(slider);
-                s_mode = MODE_GL16;
-                return APP_REDRAW_AREA;
-#endif
             }
             if (ev->type == UI_GESTURE_TAP || ev->type == UI_GESTURE_SWIPE_L ||
                 ev->type == UI_GESTURE_SWIPE_R || ev->type == UI_GESTURE_SWIPE_U ||
@@ -9545,15 +8884,11 @@ static app_redraw_t gesture_event(app_ctx_t* ctx, const ui_gesture_event_t* ev) 
     int start = control_at(ctx, ev->x0, ev->y0, &start_rect);
     int end = control_at(ctx, ev->x, ev->y, &end_rect);
     if (ev->type == UI_GESTURE_PRESS) {
-#if KIIKO_BOARD_METALIO47
         // 两个设置入口松手后一次推最终面板，不先为按下态阻塞一整轮DU20。
         // Primary setting entries present their final sheet on release without a blocking DU20 press pass.
         bool panel_entry=s_view==READING&&(s_reader_panel==READER_PANEL_TOOLS||(!s_reader_fullscreen&&s_reader_panel==READER_PANEL_NONE))&&(start==203||start==204);
         s_pressed_control=panel_entry?-1:start;
         if(panel_entry)return APP_REDRAW_NONE;
-#else
-        s_pressed_control = start;
-#endif
         return start >= 0 ? paint_control(ctx, start_rect) : APP_REDRAW_NONE;
     }
     bool decorated = s_pressed_control >= 0;
@@ -9629,7 +8964,6 @@ static app_redraw_t reader_key_action(app_ctx_t *ctx, app_reader_key_action_t ac
         default: return APP_REDRAW_NONE;
     }
 }
-#if KIIKO_BOARD_METALIO47
 // 音量键与底部自定义键独立；设置/确认面板期间消费输入，不关闭或改写面板。
 // Volume turns bypass bottom-key bindings; settings/confirmation panels consume input without changing their state.
 bool app_book_volume_key(app_ctx_t *ctx, int direction, app_redraw_t *redraw) {
@@ -9642,19 +8976,14 @@ bool app_book_volume_key(app_ctx_t *ctx, int direction, app_redraw_t *redraw) {
     *redraw = reader_key_action(ctx, direction < 0 ? APP_READER_KEY_PREV : APP_READER_KEY_NEXT);
     return true;
 }
-#endif
 static app_redraw_t on_key(app_ctx_t* ctx, int key) {
     rc_pause_auto();rc_cancel_side();s_rc_double_pending=false;
     if (s_reader_panel == READER_PANEL_FONT_RECOVERY) {
         reader_font_recovery_reset();
-#if KIIKO_BOARD_METALIO47
         s_font_runtime_fallback_seen=ttf_font_ready()&&ttf_font_is_builtin();
-#endif
         s_reader_panel = READER_PANEL_FONT_PICKER;
         return APP_REDRAW_PAGE;
     }
-#if KIIKO_BOARD_METALIO47
-#endif
     reader_indent_hold_cancel();
     s_reader_tap.pending = false;
     s_pressed_control = -1;
@@ -9721,8 +9050,6 @@ static app_redraw_t on_key(app_ctx_t* ctx, int key) {
 }
 static app_redraw_t on_power_short(app_ctx_t* ctx) {
     rc_pause_auto();rc_cancel_side();s_rc_double_pending=false;
-#if KIIKO_BOARD_METALIO47
-#endif
     s_reader_tap.pending = false;
     if (s_view != READING || !s_text || s_clear_confirm ||
         s_reader_panel == READER_PANEL_FONT_RECOVERY || !app_settings_reader_power_turn()) return APP_REDRAW_NONE;
@@ -9733,8 +9060,6 @@ static app_redraw_t on_power_short(app_ctx_t* ctx) {
 static app_redraw_t on_key_long(app_ctx_t* ctx, int key) {
     rc_pause_auto();rc_cancel_side();s_rc_double_pending=false;
     if (s_reader_panel == READER_PANEL_FONT_RECOVERY) return APP_REDRAW_NONE;
-#if KIIKO_BOARD_METALIO47
-#endif
     reader_indent_hold_cancel();
     s_reader_tap.pending = false;
     if (key != UI_KEY_2) return APP_REDRAW_NONE;
@@ -9809,7 +9134,6 @@ static int book_remote_direction(void) {
     }
     return direction;
 }
-#if KIIKO_BOARD_METALIO47
 // 实际阅读/唤醒回退也计数，每次持续回退只记一次；预览与异常启动保护不计数。
 // Observe reading/wake fallbacks once per episode, excluding previews and abnormal-start protection.
 static void reader_font_fallback_observe(void) {
@@ -9823,12 +9147,9 @@ static void reader_font_fallback_observe(void) {
     if(s_font_fallbacks<3)++s_font_fallbacks;
     if(s_font_fallbacks==3)s_font_recovery_pending=true;
 }
-#endif
 static app_redraw_t reader_font_recovery_tick(app_ctx_t *ctx) {
     if (s_view != READING || !s_text) return APP_REDRAW_NONE;
-#if KIIKO_BOARD_METALIO47
     reader_font_fallback_observe();
-#endif
     if (s_font_recovery_pending) {
         s_font_recovery_pending = false;
         s_font_recovery_save_failed = false;
@@ -9860,12 +9181,10 @@ static app_redraw_t shelf_cover_tick(app_ctx_t *ctx) {
     unsigned changed = shelf_cover_reveal_mask();
     bool repaint_hint = changed != 0;
     const int rows_now = shelf_rows();
-#if KIIKO_BOARD_METALIO47
     if (s_view == SHELF) {
         update_shelf_cover_hint(ctx);
         repaint_hint = s_shelf_cover_hint_dirty;
     } else
-#endif
     {
         int done = 0;
         for (int row = 0; row < rows_now; ++row)
@@ -9894,15 +9213,11 @@ static app_redraw_t shelf_cover_tick(app_ctx_t *ctx) {
 }
 
 static app_redraw_t on_tick(app_ctx_t* ctx) {
-#if KIIKO_BOARD_METALIO47
     app_redraw_t font_reload = reader_font_reload_tick(ctx);
     if (font_reload != APP_REDRAW_NONE) return font_reload;
-#endif
     app_redraw_t recovery = reader_font_recovery_tick(ctx);
     if (recovery != APP_REDRAW_NONE) return recovery;
     if (s_reader_panel == READER_PANEL_FONT_RECOVERY) return APP_REDRAW_NONE;
-#if KIIKO_BOARD_METALIO47
-#endif
     app_redraw_t rc_result=rc_tick(ctx);if(rc_result!=APP_REDRAW_NONE)return rc_result;
     app_redraw_t indent=reader_indent_hold_tick(ctx);
     if(indent!=APP_REDRAW_NONE)return indent;
@@ -10025,7 +9340,6 @@ static app_redraw_t on_tick(app_ctx_t* ctx) {
     app_redraw_t metadata=reader_metadata_tick(ctx);
     if(metadata!=APP_REDRAW_NONE)return metadata;
     app_redraw_t clock=reader_clock_tick(ctx);
-#if KIIKO_BOARD_METALIO47
     if(clock==APP_REDRAW_NONE) {
         warm_reader_ticket_cover(ctx);
         reader_prefetch_idle(ctx);
@@ -10045,31 +9359,23 @@ static app_redraw_t on_tick(app_ctx_t* ctx) {
             }
         }
     }
-#else
-    if(clock==APP_REDRAW_NONE)reader_prefetch_idle(ctx);
-#endif
     return clock;
 }
 static void before_lock(app_ctx_t* ctx) {
     rc_stop_auto();rc_cancel_side();s_rc_double_pending=false;
     book_shelf_page_release();
     s_shelf_page_key_valid=s_shelf_page_loading=s_shelf_page_cached=false;
-#if KIIKO_BOARD_METALIO47
     reader_font_reload_cancel();
     s_chapter_warm_done=false;
     // Sleep joins/cancels the worker; a subsequent wake may retry a cold cover.
     s_ticket_cover_started=s_ticket_cover_done=false;
-#else
-#endif
     reader_indent_hold_cancel();
     s_shelf_key_mode=s_shelf_key_paint_pending=false;s_shelf_key_delta=s_shelf_key_pressed=0;
     shelf_category_remember(ctx);
     s_category_menu=false;
     s_reader_tap.pending = false;
     track_ticket_stats(ctx);
-#if KIIKO_BOARD_METALIO47
     wr_reading_stop(false);
-#endif
     save_progress();
     // 锁屏前丢弃分行预绘，后续只按当前字体重建。/ Discard idle prefetch before lock; rebuild only with the current face.
     lock_draw();
